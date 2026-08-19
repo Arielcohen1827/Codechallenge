@@ -53,7 +53,7 @@ class InTempDirTestCase(HistoryTestCase):
         self.addCleanup(os.chdir, previous_cwd)
 
     def read_log(self, game_id):
-        with open(os.path.join(self.tmpdir.name, f"game_{game_id}.log")) as f:
+        with open(os.path.join(self.tmpdir.name, 'games', f"game_{game_id}.log")) as f:
             return f.read()
 
 

@@ -229,12 +229,29 @@ def print_report(path, metrics):
         print(f"  final: {metrics['final']}")
 
 
+def expand_log_paths(raw_paths):
+    paths = []
+    for raw_path in raw_paths:
+        path = Path(raw_path)
+        matches = sorted(Path('.').glob(raw_path)) if any(ch in raw_path for ch in '*?[') else []
+        if not matches and any(ch in raw_path for ch in '*?[') and path.parent == Path('.'):
+            matches = sorted(Path('games').glob(raw_path))
+        if matches:
+            paths.extend(matches)
+        elif path.exists():
+            paths.append(path)
+        elif Path('games', raw_path).exists():
+            paths.append(Path('games', raw_path))
+        else:
+            paths.append(path)
+    return paths
+
+
 def main():
     parser = argparse.ArgumentParser()
     parser.add_argument('logs', nargs='+')
     args = parser.parse_args()
-    for raw_path in args.logs:
-        path = Path(raw_path)
+    for path in expand_log_paths(args.logs):
         print_report(path, analyze(path))
 
 

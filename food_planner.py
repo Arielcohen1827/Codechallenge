@@ -1,5 +1,6 @@
 from dataclasses import dataclass
 
+from bot_weights import get_weights
 from snake_state import (
     GameState,
     apply_move,
@@ -115,15 +116,16 @@ def center_distance(state, pos):
 def center_control_score(state, pos):
     if pos is None:
         return -10_000
+    weights = get_weights()
 
     max_center_distance = (state.rows - 1) / 2 + (state.cols - 1) / 2
-    center_score = int((max_center_distance - center_distance(state, pos)) * 80)
+    center_score = int((max_center_distance - center_distance(state, pos)) * weights['center_unit_value'])
     edge = edge_distance(state, pos)
-    edge_score = min(edge, 4) * 450
+    edge_score = min(edge, 4) * weights['edge_depth_value']
     if edge == 0:
-        edge_score -= 3200
+        edge_score -= weights['center_edge0_penalty']
     elif edge == 1:
-        edge_score -= 1000
+        edge_score -= weights['center_edge1_penalty']
     return center_score + edge_score
 
 
@@ -138,14 +140,15 @@ def position_control_penalty(state, side, direction):
     if len(after.body(side)) <= 3:
         return 0
 
+    weights = get_weights()
     edge = edge_distance(after, head)
     penalty = 0
     if edge == 0:
-        penalty += 6500
+        penalty += weights['position_edge0_penalty']
     elif edge == 1:
-        penalty += 1800
+        penalty += weights['position_edge1_penalty']
     elif edge == 2:
-        penalty += 600
+        penalty += weights['position_edge2_penalty']
 
     borders_touching = sum(
         (
@@ -156,7 +159,7 @@ def position_control_penalty(state, side, direction):
         )
     )
     if borders_touching >= 2:
-        penalty += 2500
+        penalty += weights['position_corner_penalty']
     return penalty
 
 
@@ -181,28 +184,29 @@ def build_food_plan(state, side, food, current_target, hunger):
     safety, space_after, exits_after, tail_ok = classify_safety(after, side)
     next_food = nearest_next_food_distance(after, side, food)
 
-    value = 10_000
-    value -= our_distance * 550
-    value += race_margin * 700
-    value += min(hunger, 50) * 220
-    value += min(space_after, 80) * 16
-    value += exits_after * 260
-    value += 450 if tail_ok else 0
+    weights = get_weights()
+    value = weights['food_base_value']
+    value -= our_distance * weights['food_distance_cost']
+    value += race_margin * weights['race_margin_value']
+    value += min(hunger, 50) * weights['hunger_value']
+    value += min(space_after, 80) * weights['space_after_value']
+    value += exits_after * weights['exits_after_value']
+    value += weights['tail_reachable_bonus'] if tail_ok else 0
     value += center_control_score(after, after.head(side))
     if next_food is not None:
-        value += max(0, 12 - next_food) * 170
+        value += max(0, 12 - next_food) * weights['next_food_value']
     if food == current_target:
-        value += 1800
+        value += weights['current_target_bonus']
     if safety == 'SAFE':
-        value += 2000
+        value += weights['safe_bonus']
     elif safety == 'ACCEPTABLE_RISK':
-        value += 700
+        value += weights['acceptable_risk_bonus']
     elif safety == 'DANGEROUS':
-        value -= 6500
+        value -= weights['dangerous_penalty']
     else:
         value -= 100_000
     if enemy_distance is not None and enemy_distance + 3 < our_distance:
-        value -= 18_000
+        value -= weights['lost_race_penalty']
 
     return FoodPlan(
         food=food,
@@ -357,10 +361,11 @@ def rival_response_penalty(state, side, direction):
         return -1_000_000
     if stats['forced_delayed_zero']:
         return -80_000
+    weights = get_weights()
     return -(
-        stats['zero_escape_replies'] * 9000
-        + stats['delayed_forced_zero_replies'] * 18000
-        + stats['one_escape_replies'] * 2500
+        stats['zero_escape_replies'] * weights['zero_escape_penalty']
+        + stats['delayed_forced_zero_replies'] * weights['delayed_zero_penalty']
+        + stats['one_escape_replies'] * weights['one_escape_penalty']
         + rival_space_penalty(state, side, direction)
         + position_control_penalty(state, side, direction)
     )
@@ -379,11 +384,12 @@ def rival_space_penalty(state, side, direction):
     body_len = len(after.body(side))
     immediate_region = len(flood_region(after, head, after.occupied()))
     immediate_exits = count_exits(after, side)
+    weights = get_weights()
     base = 0
     if immediate_region < body_len * 2 + 6:
-        base += (body_len * 2 + 6 - immediate_region) * 1400
+        base += (body_len * 2 + 6 - immediate_region) * weights['small_region_penalty']
     if immediate_exits <= 1:
-        base += 3500
+        base += weights['one_exit_penalty']
 
     enemy_moves = legal_moves(after, enemy)
     if not enemy_moves:
@@ -403,14 +409,17 @@ def rival_space_penalty(state, side, direction):
         enemy_region = 0 if enemy_head is None else len(flood_region(after_enemy, enemy_head, after_enemy.occupied()))
         threat = 0
         if not replies:
-            threat += 80_000
+            threat += weights['enemy_no_reply_threat']
         if own_region < body_len * 2 + 6:
-            threat += (body_len * 2 + 6 - own_region) * 1400
+            threat += (body_len * 2 + 6 - own_region) * weights['small_region_penalty']
         if count_exits(after_enemy, side) <= 1:
-            threat += 3500
+            threat += weights['one_exit_penalty']
         territory_gap = enemy_region - own_region
-        if territory_gap > 35:
-            threat += min(25_000, (territory_gap - 35) * 250)
+        if territory_gap > weights['territory_gap_limit']:
+            threat += min(
+                weights['territory_gap_penalty_cap'],
+                (territory_gap - weights['territory_gap_limit']) * weights['territory_gap_penalty'],
+            )
         worst_reply = max(worst_reply, threat)
 
     return base + worst_reply
@@ -428,6 +437,7 @@ def hot_lost_food_penalty(state, side, direction):
     if after_head is None:
         return 0
 
+    weights = get_weights()
     penalty = 0
     for food in state.food:
         our_distance = shortest_distance(state, head, food, side)
@@ -445,7 +455,7 @@ def hot_lost_food_penalty(state, side, direction):
             and after_distance < our_distance
             and (our_distance <= 6 or after_distance <= 3)
         ):
-            penalty += 2500 + (3 - enemy_distance) * 1200
+            penalty += weights['hot_lost_food_base'] + (3 - enemy_distance) * weights['hot_lost_food_enemy_bonus']
     return penalty
 
 
@@ -465,6 +475,7 @@ def forced_kill_move(state, side, legal):
 
 def fallback_food_positioning(state, side, legal, plan, hunger, repeat_count):
     def key(direction):
+        weights = get_weights()
         after = apply_move(state, direction, side)
         head = after.head(side)
         if head is None:
@@ -472,7 +483,7 @@ def fallback_food_positioning(state, side, legal, plan, hunger, repeat_count):
         safety, _, _, _ = classify_safety(after, side)
         if safety == 'SUICIDAL':
             return (-999999, 0, 0, 0)
-        danger_penalty = 10000 if safety == 'DANGEROUS' and hunger < 35 else 0
+        danger_penalty = weights['fallback_danger_penalty'] if safety == 'DANGEROUS' and hunger < 35 else 0
         nearest = None
         if after.food:
             distances = [shortest_distance(after, head, food, side) for food in after.food]
@@ -484,13 +495,13 @@ def fallback_food_positioning(state, side, legal, plan, hunger, repeat_count):
             progress = before - manhattan(head, plan.food)
         region = flood_region(after, head, after.occupied())
         exits = count_exits(after, side)
-        food_distance_score = 0 if nearest is None else -nearest * 80
-        cycle_penalty = repeat_count * 500 if progress <= 0 and hunger >= 10 else 0
+        food_distance_score = 0 if nearest is None else -nearest * weights['fallback_food_distance_cost']
+        cycle_penalty = repeat_count * weights['fallback_cycle_penalty'] if progress <= 0 and hunger >= 10 else 0
         rival_penalty = rival_response_penalty(state, side, direction)
         hot_lost_penalty = hot_lost_food_penalty(state, side, direction)
         control_score = center_control_score(after, head) if len(after.body(side)) > 3 else 0
         return (
-            progress * (1000 + hunger * 80)
+            progress * (weights['fallback_progress_value'] + hunger * weights['fallback_hunger_progress_value'])
             + food_distance_score
             + control_score
             - cycle_penalty

@@ -1,5 +1,6 @@
 import asyncio
 import json
+from pathlib import Path
 import sys
 import time
 
@@ -9,13 +10,15 @@ except ModuleNotFoundError:
     websockets = None
 
 from bot_version import BOT_VERSION, BOT_VERSION_NOTES
+from bot_weights import load_active_weights
 from food_planner import choose_food_plan
 from snake_brain import SnakeBrain, final_safe_direction
 from snake_state import apply_move, legal_moves, parse_state, step
 
 
 # A running text log of events received / actions sent per game, written to
-# game_<game_id>.log when the match ends.
+# games/game_<game_id>.log when the match ends.
+LOG_DIR = Path('games')
 HISTORY = {}
 LOGGED_META = set()
 BOT = SnakeBrain()
@@ -54,9 +57,11 @@ def log_debug(game_id, message):
 
 def write_game_log(game_id):
     try:
-        with open(f"game_{game_id}.log", "w") as f:
+        LOG_DIR.mkdir(parents=True, exist_ok=True)
+        path = LOG_DIR / f"game_{game_id}.log"
+        with path.open("w") as f:
             f.write("\n".join(HISTORY.get(game_id, [])) + "\n")
-        print(f"saved game_{game_id}.log")
+        print(f"saved {path}")
     except OSError as e:
         print(f"could not write game log: {e}")
 
@@ -178,6 +183,7 @@ async def process_wall(websocket, request_data):
 
 if __name__ == '__main__':
     if len(sys.argv) >= 2:
+        load_active_weights()
         auth_token = sys.argv[1]
         asyncio.get_event_loop().run_until_complete(start(auth_token))
     else:

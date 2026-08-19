@@ -7,6 +7,7 @@ from pathlib import Path
 
 from analyze_matches import parse_log
 from bot_version import BOT_VERSION
+from bot_weights import load_active_weights, set_active_weights
 from food_planner import (
     center_control_score,
     classify_safety,
@@ -23,6 +24,7 @@ DIRECTIONS = {'up', 'down', 'left', 'right'}
 @dataclass
 class SimResult:
     seed: int
+    candidate_side: str | None
     winner: str | None
     turns: int
     score_a: int
@@ -119,19 +121,22 @@ def winner_for(state, dead_side=None):
     return 'A' if score_a > score_b else 'B'
 
 
-def simulate_game(seed, max_turns=300, rows=15, cols=15, food_count=3):
+def simulate_game(seed, max_turns=300, rows=15, cols=15, food_count=3, weights_by_side=None, candidate_side=None):
     rng = random.Random(seed)
     state = initial_state(seed, rows, cols, food_count, max_turns)
-    brain = SnakeBrain(enable_debug=False)
+    brains = {'A': SnakeBrain(enable_debug=False), 'B': SnakeBrain(enable_debug=False)}
     metrics = Counter()
     game_id = f'sim_{seed}'
 
     for turn_index in range(max_turns):
         side = state.side
+        if weights_by_side and side in weights_by_side:
+            set_active_weights(weights_by_side[side])
         legal = legal_moves(state, side)
         if not legal:
             return SimResult(
                 seed=seed,
+                candidate_side=candidate_side,
                 winner=winner_for(state, side),
                 turns=turn_index,
                 score_a=state.scores.get('A', 0),
@@ -144,6 +149,7 @@ def simulate_game(seed, max_turns=300, rows=15, cols=15, food_count=3):
             )
 
         data = make_turn_data(state, game_id, turn_index)
+        brain = brains[side]
         direction = brain.choose_move(data)
         direction = brain.safe_direction(data, direction)
         if direction not in legal:
@@ -163,6 +169,7 @@ def simulate_game(seed, max_turns=300, rows=15, cols=15, food_count=3):
 
     return SimResult(
         seed=seed,
+        candidate_side=candidate_side,
         winner=winner_for(state),
         turns=max_turns,
         score_a=state.scores.get('A', 0),
@@ -182,12 +189,35 @@ def summarize_simulations(results):
     deaths = Counter(result.no_legal_side for result in results if result.no_legal_side)
     foods_a = sum(result.foods_a for result in results)
     foods_b = sum(result.foods_b for result in results)
+    score_a = sum(result.score_a for result in results)
+    score_b = sum(result.score_b for result in results)
     edge_moves = sum(result.edge_moves for result in results)
     center_total = sum(result.center_score_total for result in results)
+    candidate_results = [result for result in results if result.candidate_side in ('A', 'B')]
+    candidate_score = sum(result.score_a if result.candidate_side == 'A' else result.score_b for result in candidate_results)
+    opponent_score = sum(result.score_b if result.candidate_side == 'A' else result.score_a for result in candidate_results)
+    candidate_foods = sum(result.foods_a if result.candidate_side == 'A' else result.foods_b for result in candidate_results)
+    opponent_foods = sum(result.foods_b if result.candidate_side == 'A' else result.foods_a for result in candidate_results)
+    candidate_wins = sum(1 for result in candidate_results if result.winner == result.candidate_side)
+    candidate_losses = sum(
+        1
+        for result in candidate_results
+        if result.winner in ('A', 'B') and result.winner != result.candidate_side
+    )
+    candidate_deaths = sum(1 for result in candidate_results if result.no_legal_side == result.candidate_side)
+    opponent_deaths = sum(
+        1
+        for result in candidate_results
+        if result.no_legal_side in ('A', 'B') and result.no_legal_side != result.candidate_side
+    )
     return {
         'bot_version': BOT_VERSION,
         'games': games,
         'avg_turns': round(total_turns / games, 2) if games else 0,
+        'avg_score_A': round(score_a / games, 2) if games else 0,
+        'avg_score_B': round(score_b / games, 2) if games else 0,
+        'avg_total_game_score': round((score_a + score_b) / games, 2) if games else 0,
+        'avg_score_diff_A_minus_B': round((score_a - score_b) / games, 2) if games else 0,
         'wins_A': wins['A'],
         'wins_B': wins['B'],
         'draws': wins['draw'],
@@ -198,45 +228,75 @@ def summarize_simulations(results):
         'food_per_100_turns': round((foods_a + foods_b) * 100 / total_turns, 2) if total_turns else 0,
         'edge_moves_per_100_turns': round(edge_moves * 100 / total_turns, 2) if total_turns else 0,
         'avg_center_score': round(center_total / total_turns, 2) if total_turns else 0,
+        'candidate_games': len(candidate_results),
+        'candidate_wins': candidate_wins,
+        'candidate_losses': candidate_losses,
+        'candidate_deaths': candidate_deaths,
+        'opponent_deaths': opponent_deaths,
+        'avg_candidate_score': round(candidate_score / len(candidate_results), 2) if candidate_results else 0,
+        'avg_opponent_score': round(opponent_score / len(candidate_results), 2) if candidate_results else 0,
+        'avg_candidate_score_diff': round((candidate_score - opponent_score) / len(candidate_results), 2)
+        if candidate_results
+        else 0,
+        'candidate_foods': candidate_foods,
+        'opponent_foods': opponent_foods,
     }
 
 
-def evaluate_log_decisions(paths):
-    brain = SnakeBrain(enable_debug=False)
-    metrics = Counter()
-    by_reason = Counter()
+def iter_log_entries(paths):
     for path in paths:
         turns, _, _, _, _ = parse_log(Path(path))
         for index, data in enumerate(turns):
-            state = parse_state(data)
-            side = state.side
-            legal = legal_moves(state, side)
-            metrics['positions'] += 1
-            if not legal:
-                metrics['no_legal_positions'] += 1
-                continue
+            yield path, index, data
 
-            direction = brain.choose_move(data)
-            direction = brain.safe_direction(data, direction)
-            debug = brain.decision_debug(data.get('game_id', 'default')) or {}
-            by_reason[debug.get('reason', 'unknown')] += 1
-            if direction not in DIRECTIONS:
-                metrics['invalid_direction'] += 1
-                continue
-            if direction not in legal:
-                metrics['illegal_after_repair'] += 1
-                continue
 
-            after = apply_move(state, direction, side)
-            safety, _, _, _ = classify_safety(after, side)
-            metrics[f'safety_{safety}'] += 1
-            if step(state.head(side), direction) in state.food:
-                metrics['food_taken_now'] += 1
-            if position_control_penalty(state, side, direction) > 0:
-                metrics['edge_or_corner_move'] += 1
+def select_log_entries(paths, max_positions=None):
+    entries = list(iter_log_entries(paths))
+    if not max_positions or max_positions >= len(entries):
+        return entries, False
+    stride = max(1, len(entries) // max_positions)
+    selected = entries[::stride][:max_positions]
+    return selected, True
+
+
+def evaluate_log_decisions(paths, max_positions=None):
+    entries, sampled = select_log_entries(paths, max_positions)
+    sequential_brain = SnakeBrain(enable_debug=False)
+    metrics = Counter()
+    by_reason = Counter()
+    for _, _, data in entries:
+        brain = SnakeBrain(enable_debug=False) if sampled else sequential_brain
+        state = parse_state(data)
+        side = state.side
+        legal = legal_moves(state, side)
+        metrics['positions'] += 1
+        if not legal:
+            metrics['no_legal_positions'] += 1
+            continue
+
+        direction = brain.choose_move(data)
+        direction = brain.safe_direction(data, direction)
+        debug = brain.decision_debug(data.get('game_id', 'default')) or {}
+        by_reason[debug.get('reason', 'unknown')] += 1
+        if direction not in DIRECTIONS:
+            metrics['invalid_direction'] += 1
+            continue
+        if direction not in legal:
+            metrics['illegal_after_repair'] += 1
+            continue
+
+        after = apply_move(state, direction, side)
+        safety, _, _, _ = classify_safety(after, side)
+        metrics[f'safety_{safety}'] += 1
+        if step(state.head(side), direction) in state.food:
+            metrics['food_taken_now'] += 1
+        if position_control_penalty(state, side, direction) > 0:
+            metrics['edge_or_corner_move'] += 1
+        if not sampled:
             brain.commit_move(data, direction)
 
     metrics['bot_version'] = BOT_VERSION
+    metrics['sampled_positions'] = sampled
     metrics['reasons'] = dict(by_reason)
     return metrics
 
@@ -245,8 +305,14 @@ def expand_log_paths(raw_paths):
     paths = []
     for raw_path in raw_paths:
         matches = sorted(Path('.').glob(raw_path)) if any(ch in raw_path for ch in '*?[') else []
+        if not matches and any(ch in raw_path for ch in '*?[') and Path(raw_path).parent == Path('.'):
+            matches = sorted(Path('games').glob(raw_path))
         if matches:
             paths.extend(matches)
+        elif Path(raw_path).exists():
+            paths.append(Path(raw_path))
+        elif Path('games', raw_path).exists():
+            paths.append(Path('games', raw_path))
         else:
             paths.append(Path(raw_path))
     return paths
@@ -271,9 +337,11 @@ def main():
 
     logs = sub.add_parser('logs', help='reevaluate historical log positions with the current bot')
     logs.add_argument('paths', nargs='+')
+    logs.add_argument('--max-positions', type=int, default=0)
     logs.add_argument('--json', action='store_true')
 
     args = parser.parse_args()
+    load_active_weights()
     if args.command == 'simulate':
         results = [
             simulate_game(args.seed + offset, args.turns, args.rows, args.cols, args.food)
@@ -286,6 +354,7 @@ def main():
             print(f"bot_version: {summary['bot_version']}")
             print(f"games: {summary['games']}")
             print(f"avg_turns: {summary['avg_turns']}")
+            print(f"avg_score_A: {summary['avg_score_A']}  avg_score_B: {summary['avg_score_B']}")
             print(f"wins_A: {summary['wins_A']}  wins_B: {summary['wins_B']}  draws: {summary['draws']}")
             print(f"deaths_A: {summary['deaths_A']}  deaths_B: {summary['deaths_B']}")
             print(f"foods_A: {summary['foods_A']}  foods_B: {summary['foods_B']}")
@@ -293,7 +362,7 @@ def main():
             print(f"edge_moves_per_100_turns: {summary['edge_moves_per_100_turns']}")
             print(f"avg_center_score: {summary['avg_center_score']}")
     elif args.command == 'logs':
-        summary = evaluate_log_decisions(expand_log_paths(args.paths))
+        summary = evaluate_log_decisions(expand_log_paths(args.paths), args.max_positions or None)
         if args.json:
             print_json(summary)
         else:

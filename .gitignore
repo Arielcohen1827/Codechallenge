@@ -133,3 +133,8 @@ start_dev.sh
 
 # game logs written at the end of each match
 game_*.log
+games/
+
+# local weight search outputs
+weights/best_weights.json
+weights/active_weights.json

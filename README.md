@@ -62,10 +62,10 @@ They also run on GitHub Actions for every push and pull request
 
 ## Game logs
 
-When a match ends, the client writes a **`game_<game_id>.log`** in the working
-directory with everything that happened: each event received (`<`) and action
+When a match ends, the client writes a **`games/game_<game_id>.log`** file with
+everything that happened: each event received (`<`) and action
 sent (`>`), as JSON, ending with the `game_over` event. Useful for replaying or
-debugging a match. These files are git-ignored.
+debugging a match. The `games/` directory is git-ignored.
 
 Each new log starts with a local metadata line (`=`) containing the bot version
 from `bot_version.py`. Bump `BOT_VERSION` before a new test batch, for example
@@ -101,13 +101,58 @@ Reevaluate real match positions using the current bot version:
 python bot_lab.py logs game_*.log
 ```
 
+For a faster sampled pass:
+
+```bash
+python bot_lab.py logs game_*.log --max-positions 300
+```
+
 Useful metrics:
 
 - `food_per_100_turns`: how often the bot is eating.
+- `avg_score_A` / `avg_score_B`: real game score, using `+1` per move and
+  `+100` per food.
 - `edge_moves_per_100_turns`: how often it goes to border/corner positions.
 - `avg_center_score`: whether it is tending toward center control.
 - `safety_SAFE` / `safety_ACCEPTABLE_RISK`: immediate safety classification of
   the current version's decisions on logged positions.
+
+## Weight Optimizer
+
+`optimize_weights.py` runs a reproducible random search over the bot's scoring
+weights. Each candidate plays against the default weights and alternates sides,
+so the optimizer can compare real game score and score difference.
+
+Quick search:
+
+```bash
+python optimize_weights.py --trials 12 --games 3 --turns 80
+```
+
+Use saved real games as extra pressure:
+
+```bash
+python optimize_weights.py --trials 20 --games 4 --turns 100 --logs game_*.log
+```
+
+By default the optimizer samples up to 300 real log positions per candidate. Use
+`--max-log-positions 0` to evaluate every logged position.
+
+Save and activate the best weights locally:
+
+```bash
+python optimize_weights.py --trials 20 --games 4 --turns 100 --logs game_*.log --activate
+```
+
+The bot automatically loads `weights/active_weights.json` when present. Delete
+that file to return to the default weights in `bot_weights.py`.
+
+In optimizer output:
+
+- `score` is the optimizer's combined training score.
+- `game_score` is the candidate's real average game score.
+- `diff` is candidate score minus opponent score.
+- `w` is candidate wins over candidate games.
 
 ## Write your own bot
 
