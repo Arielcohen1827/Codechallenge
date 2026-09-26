@@ -96,6 +96,8 @@ DEFAULT_WEIGHTS = {
     'deep_pickup_now_bonus': 8500,
     'deep_score_point_value': 18,
     'deep_wrong_food_penalty': 140_000,
+    'deep_wall_hit_penalty': 160_000,
+    'deep_enemy_wall_hit_bonus': 12_000,
     'deep_enemy_trapped_bonus': 120_000,
     'deep_enemy_food_penalty': 6500,
     'deep_enemy_pickup_penalty': 14_000,
@@ -121,6 +123,7 @@ DEFAULT_WEIGHTS = {
     'fallback_denial_reach_bonus': 500,
     'fallback_cycle_penalty': 500,
     'fallback_danger_penalty': 10_000,
+    'fallback_wall_hit_penalty': 160_000,
 }
 
 ACTIVE_WEIGHTS = dict(DEFAULT_WEIGHTS)

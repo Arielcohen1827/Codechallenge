@@ -48,6 +48,7 @@ def state_signature(state):
         tuple(sorted(state.food_values.items())),
         tuple(sorted(state.pickups)),
         tuple(sorted(state.multipliers.items())),
+        tuple(sorted(state.walls)),
     )
 
 
@@ -159,6 +160,8 @@ def analyze(path):
                 metrics['multiplier_pickups_us'] += 1
             elif target_cell in state.wrong_food():
                 metrics['wrong_digits_us'] += 1
+            elif target_cell in state.walls:
+                metrics['wall_hits_us'] += 1
 
         after = apply_move(state, direction, side)
         if score_food_delta(state, after, side):

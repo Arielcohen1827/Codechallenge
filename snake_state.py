@@ -13,6 +13,7 @@ FOOD_SCORE = 100
 NORMAL_SCORE = 1
 WRONG_FOOD_PENALTY = -500
 MULTIPLIER_PICKUP_SCORE = 50
+WALL_HIT_PENALTY = -500
 CRASH_PENALTY = -500
 RIVAL_CRASH_REWARD = 1000
 NEVER_RELEASE = 10_000
@@ -34,6 +35,7 @@ class GameState:
     next_food_digit: int | None = None
     pickups: frozenset[tuple[int, int]] = frozenset()
     multipliers: dict[str, int] = field(default_factory=lambda: {'A': 1, 'B': 1})
+    walls: frozenset[tuple[int, int]] = frozenset()
 
     def head(self, side):
         snake = self.snakes.get(side, ())
@@ -43,7 +45,7 @@ class GameState:
         return self.snakes.get(side, ())
 
     def occupied(self):
-        cells = set()
+        cells = set(self.walls)
         for snake in self.snakes.values():
             cells.update(snake)
         return cells
@@ -133,6 +135,12 @@ def parse_state(data, previous_snakes=None):
         for c, ch in enumerate(row)
         if ch == 'X'
     )
+    walls = frozenset(
+        (r, c)
+        for r, row in enumerate(board)
+        for c, ch in enumerate(row)
+        if ch == '#'
+    )
     snakes = {
         'A': reconstruct_snake(board, 'A'),
         'B': reconstruct_snake(board, 'B'),
@@ -163,6 +171,7 @@ def parse_state(data, previous_snakes=None):
             'A': max(1, int(data.get('multiplier_1', data.get('multiplier_A', 1)) or 1)),
             'B': max(1, int(data.get('multiplier_2', data.get('multiplier_B', 1)) or 1)),
         },
+        walls=walls,
     )
 
 
@@ -318,6 +327,9 @@ def legal_moves(state, side=None):
             continue
         if len(snake) > 1 and target == snake[1]:
             continue
+        if target in state.walls:
+            legal.append(direction)
+            continue
         eats = target in state.food
         blocked = set(occupied)
         if not eats and side in state.reliable_tails:
@@ -337,16 +349,22 @@ def apply_move(state, direction, side=None):
     if not snake:
         return state
     target = step(snake[0], direction)
+    hits_wall = target in state.walls
     eats = target in state.food
     wrong_food = target in state.food_values and not eats
     takes_pickup = target in state.pickups
-    new_snake = (target,) + snake if eats else (target,) + snake[:-1]
+    if hits_wall:
+        new_snake = snake
+    else:
+        new_snake = (target,) + snake if eats else (target,) + snake[:-1]
     snakes = dict(state.snakes)
     snakes[side] = new_snake
     scores = dict(state.scores)
     multipliers = dict(state.multipliers)
     move_score = NORMAL_SCORE
-    if eats:
+    if hits_wall:
+        move_score += WALL_HIT_PENALTY
+    elif eats:
         move_score += state.food_reward(side, target)
     elif wrong_food:
         move_score += WRONG_FOOD_PENALTY
@@ -356,16 +374,17 @@ def apply_move(state, direction, side=None):
     scores[side] = scores.get(side, 0) + move_score
 
     food_values = dict(state.food_values)
-    if target in food_values:
+    if not hits_wall and target in food_values:
         food_values.pop(target, None)
     next_food_digit = state.next_food_digit
-    if eats and next_food_digit is not None:
+    if eats and not hits_wall and next_food_digit is not None:
         next_food_digit = cyclic_digit(next_food_digit)
     if food_values and next_food_digit is None:
         next_food_digit = find_next_food_digit(food_values.values())
     food = frozenset(
         pos for pos, digit in food_values.items() if digit == next_food_digit
     ) if food_values else frozenset(state.food - {target})
+    walls = shrink_wall(state.walls) if side == 'B' else state.walls
     return GameState(
         rows=state.rows,
         cols=state.cols,
@@ -379,9 +398,25 @@ def apply_move(state, direction, side=None):
         reliable_tails=state.reliable_tails | {side},
         food_values=food_values,
         next_food_digit=next_food_digit,
-        pickups=frozenset(state.pickups - {target}) if takes_pickup else state.pickups,
+        pickups=frozenset(state.pickups - {target}) if takes_pickup and not hits_wall else state.pickups,
         multipliers=multipliers,
+        walls=walls,
     )
+
+
+def shrink_wall(walls):
+    walls = frozenset(walls)
+    if len(walls) <= 1:
+        return frozenset()
+    rows = {r for r, _ in walls}
+    cols = {c for _, c in walls}
+    if len(rows) == 1:
+        ordered = sorted(walls, key=lambda cell: cell[1])
+    elif len(cols) == 1:
+        ordered = sorted(walls, key=lambda cell: cell[0])
+    else:
+        return walls
+    return frozenset(ordered[1:-1])
 
 
 def blocked_for_path(state, side):
@@ -407,6 +442,15 @@ def release_times(state):
                 releases[cell] = min(releases.get(cell, NEVER_RELEASE), len(snake) - index)
             else:
                 releases[cell] = NEVER_RELEASE
+    if state.walls:
+        rows = {r for r, _ in state.walls}
+        if len(rows) == 1:
+            ordered_wall = sorted(state.walls, key=lambda cell: cell[1])
+        else:
+            ordered_wall = sorted(state.walls, key=lambda cell: cell[0])
+        for index, cell in enumerate(ordered_wall):
+            layer = min(index, len(ordered_wall) - index - 1)
+            releases[cell] = min(releases.get(cell, NEVER_RELEASE), layer + 2)
     return releases
 
 

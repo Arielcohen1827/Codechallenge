@@ -25,8 +25,8 @@ The server then sends events and the bot replies with actions (JSON):
 | `game_over`    | nothing (the match ended)                                            |
 
 `run.py` uses the competitive Snake strategy in this repository. It supports
-variable 12-20 row/column boards, numbered food and permanent multiplier
-pickups.
+variable 12-20 row/column boards, numbered food, permanent multiplier pickups,
+and the shrinking `#` wall from game version 5.
 
 ## Requirements
 
@@ -89,7 +89,7 @@ selected. They are not sent to the server.
 `bot_lab.py` runs repeatable local checks for the Snake bot without connecting
 to the Code Challenge server.
 
-Run deterministic v4 self-play simulations. Board dimensions are randomized
+Run deterministic v5 self-play simulations. Board dimensions are randomized
 between 12 and 20 for every seed unless `--rows` and `--cols` are supplied:
 
 ```bash
@@ -115,6 +115,7 @@ Useful metrics:
   `digit * 100 * multiplier` for correct food.
 - `pickups_A` / `pickups_B`: multiplier pickups collected.
 - `wrong_digits_A` / `wrong_digits_B`: penalized digits eaten.
+- `wall_hits_A` / `wall_hits_B`: penalized attempts to move into `#`.
 - `edge_moves_per_100_turns`: how often it goes to border/corner positions.
 - `avg_center_score`: whether it is tending toward center control.
 - `safety_SAFE` / `safety_ACCEPTABLE_RISK`: immediate safety classification of

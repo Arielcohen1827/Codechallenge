@@ -44,6 +44,8 @@ class SimResult:
     pickups_b: int
     wrong_digits_a: int
     wrong_digits_b: int
+    wall_hits_a: int
+    wall_hits_b: int
     no_legal_side: str | None
     edge_moves: int
     center_score_total: int
@@ -51,6 +53,8 @@ class SimResult:
 
 def render_board(state):
     board = [[' ' for _ in range(state.cols)] for _ in range(state.rows)]
+    for r, c in state.walls:
+        board[r][c] = '#'
     if state.food_values:
         for (r, c), digit in state.food_values.items():
             board[r][c] = str(digit)
@@ -88,6 +92,7 @@ def spawn_food(state, rng, food_count, numbered=True, pickup_count=2):
     food = set(state.food)
     food_values = dict(state.food_values)
     pickups = set(state.pickups)
+    walls = set(state.walls)
     empties = [
         (r, c)
         for r in range(state.rows)
@@ -109,6 +114,8 @@ def spawn_food(state, rng, food_count, numbered=True, pickup_count=2):
             food.add(empties.pop())
     while len(pickups) < pickup_count and empties:
         pickups.add(empties.pop())
+    if not walls:
+        walls = set(spawn_wall(empties, state.rows, state.cols, rng))
     return GameState(
         rows=state.rows,
         cols=state.cols,
@@ -124,7 +131,29 @@ def spawn_food(state, rng, food_count, numbered=True, pickup_count=2):
         next_food_digit=next_digit if numbered else None,
         pickups=frozenset(pickups),
         multipliers=state.multipliers,
+        walls=frozenset(walls),
     )
+
+
+def spawn_wall(empties, rows, cols, rng):
+    available = set(empties)
+    candidates = []
+    max_length = min(11, max(rows, cols))
+    lengths = [length for length in range(3, max_length + 1, 2)]
+    for length in lengths:
+        if length <= cols:
+            for row in range(rows):
+                for start in range(cols - length + 1):
+                    cells = tuple((row, start + offset) for offset in range(length))
+                    if all(cell in available for cell in cells):
+                        candidates.append(cells)
+        if length <= rows:
+            for col in range(cols):
+                for start in range(rows - length + 1):
+                    cells = tuple((start + offset, col) for offset in range(length))
+                    if all(cell in available for cell in cells):
+                        candidates.append(cells)
+    return frozenset(rng.choice(candidates)) if candidates else frozenset()
 
 
 def initial_state(seed, rows=15, cols=15, food_count=5, max_turns=300, numbered=True):
@@ -199,6 +228,8 @@ def simulate_game(seed, max_turns=300, rows=None, cols=None, food_count=5, weigh
                 pickups_b=metrics['pickups_B'],
                 wrong_digits_a=metrics['wrong_digits_A'],
                 wrong_digits_b=metrics['wrong_digits_B'],
+                wall_hits_a=metrics['wall_hits_A'],
+                wall_hits_b=metrics['wall_hits_B'],
                 no_legal_side=side,
                 edge_moves=metrics['edge_moves'],
                 center_score_total=metrics['center_score_total'],
@@ -217,6 +248,7 @@ def simulate_game(seed, max_turns=300, rows=None, cols=None, food_count=5, weigh
         ate = target in state.food
         took_pickup = target in state.pickups
         ate_wrong_digit = target in state.wrong_food()
+        hit_wall = target in state.walls
         state = apply_move(state, direction, side)
         if ate:
             metrics[f'foods_{side}'] += 1
@@ -224,6 +256,8 @@ def simulate_game(seed, max_turns=300, rows=None, cols=None, food_count=5, weigh
             metrics[f'pickups_{side}'] += 1
         if ate_wrong_digit:
             metrics[f'wrong_digits_{side}'] += 1
+        if hit_wall:
+            metrics[f'wall_hits_{side}'] += 1
         head = state.head(side)
         metrics['center_score_total'] += center_control_score(state, head)
         brain.commit_move(data, direction)
@@ -242,6 +276,8 @@ def simulate_game(seed, max_turns=300, rows=None, cols=None, food_count=5, weigh
         pickups_b=metrics['pickups_B'],
         wrong_digits_a=metrics['wrong_digits_A'],
         wrong_digits_b=metrics['wrong_digits_B'],
+        wall_hits_a=metrics['wall_hits_A'],
+        wall_hits_b=metrics['wall_hits_B'],
         no_legal_side=None,
         edge_moves=metrics['edge_moves'],
         center_score_total=metrics['center_score_total'],
@@ -259,6 +295,8 @@ def summarize_simulations(results):
     pickups_b = sum(result.pickups_b for result in results)
     wrong_digits_a = sum(result.wrong_digits_a for result in results)
     wrong_digits_b = sum(result.wrong_digits_b for result in results)
+    wall_hits_a = sum(result.wall_hits_a for result in results)
+    wall_hits_b = sum(result.wall_hits_b for result in results)
     score_a = sum(result.score_a for result in results)
     score_b = sum(result.score_b for result in results)
     edge_moves = sum(result.edge_moves for result in results)
@@ -268,6 +306,14 @@ def summarize_simulations(results):
     opponent_score = sum(result.score_b if result.candidate_side == 'A' else result.score_a for result in candidate_results)
     candidate_foods = sum(result.foods_a if result.candidate_side == 'A' else result.foods_b for result in candidate_results)
     opponent_foods = sum(result.foods_b if result.candidate_side == 'A' else result.foods_a for result in candidate_results)
+    candidate_wall_hits = sum(
+        result.wall_hits_a if result.candidate_side == 'A' else result.wall_hits_b
+        for result in candidate_results
+    )
+    opponent_wall_hits = sum(
+        result.wall_hits_b if result.candidate_side == 'A' else result.wall_hits_a
+        for result in candidate_results
+    )
     candidate_wins = sum(1 for result in candidate_results if result.winner == result.candidate_side)
     candidate_losses = sum(
         1
@@ -299,6 +345,8 @@ def summarize_simulations(results):
         'pickups_B': pickups_b,
         'wrong_digits_A': wrong_digits_a,
         'wrong_digits_B': wrong_digits_b,
+        'wall_hits_A': wall_hits_a,
+        'wall_hits_B': wall_hits_b,
         'food_per_100_turns': round((foods_a + foods_b) * 100 / total_turns, 2) if total_turns else 0,
         'edge_moves_per_100_turns': round(edge_moves * 100 / total_turns, 2) if total_turns else 0,
         'avg_center_score': round(center_total / total_turns, 2) if total_turns else 0,
@@ -314,6 +362,8 @@ def summarize_simulations(results):
         else 0,
         'candidate_foods': candidate_foods,
         'opponent_foods': opponent_foods,
+        'candidate_wall_hits': candidate_wall_hits,
+        'opponent_wall_hits': opponent_wall_hits,
     }
 
 
@@ -364,6 +414,8 @@ def evaluate_log_decisions(paths, max_positions=None):
         metrics[f'safety_{safety}'] += 1
         if step(state.head(side), direction) in state.food:
             metrics['food_taken_now'] += 1
+        if step(state.head(side), direction) in state.walls:
+            metrics['wall_hit'] += 1
         if position_control_penalty(state, side, direction) > 0:
             metrics['edge_or_corner_move'] += 1
         if not sampled:
@@ -434,6 +486,7 @@ def main():
             print(f"foods_A: {summary['foods_A']}  foods_B: {summary['foods_B']}")
             print(f"pickups_A: {summary['pickups_A']}  pickups_B: {summary['pickups_B']}")
             print(f"wrong_digits_A: {summary['wrong_digits_A']}  wrong_digits_B: {summary['wrong_digits_B']}")
+            print(f"wall_hits_A: {summary['wall_hits_A']}  wall_hits_B: {summary['wall_hits_B']}")
             print(f"food_per_100_turns: {summary['food_per_100_turns']}")
             print(f"edge_moves_per_100_turns: {summary['edge_moves_per_100_turns']}")
             print(f"avg_center_score: {summary['avg_center_score']}")

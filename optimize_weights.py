@@ -96,6 +96,8 @@ def simulation_score(summary):
         - summary['edge_moves_per_100_turns'] * 45
         - summary.get('candidate_deaths', 0) * 2500
         + summary.get('opponent_deaths', 0) * 700
+        - summary.get('candidate_wall_hits', 0) * 900
+        + summary.get('opponent_wall_hits', 0) * 250
     )
 
 
@@ -147,6 +149,8 @@ def is_valid_improvement(record, args):
         return False
     if sim['candidate_deaths'] > args.max_candidate_deaths:
         return False
+    if sim.get('candidate_wall_hits', 0) > args.max_candidate_wall_hits:
+        return False
     if sim['edge_moves_per_100_turns'] > args.max_edge100:
         return False
     if sim['food_per_100_turns'] < args.min_food100:
@@ -167,7 +171,8 @@ def print_candidate(rank, score, sim_summary, log_summary=None):
         f"food100={sim_summary['food_per_100_turns']} "
         f"edge100={sim_summary['edge_moves_per_100_turns']} "
         f"center={sim_summary['avg_center_score']} "
-        f"deaths={sim_summary['deaths_A'] + sim_summary['deaths_B']}"
+        f"deaths={sim_summary['deaths_A'] + sim_summary['deaths_B']} "
+        f"wall_hits={sim_summary.get('wall_hits_A', 0) + sim_summary.get('wall_hits_B', 0)}"
     )
     if log_summary:
         print(
@@ -244,6 +249,7 @@ def main():
     parser.add_argument('--max-edge100', type=float, default=50)
     parser.add_argument('--min-food100', type=float, default=13)
     parser.add_argument('--max-candidate-deaths', type=int, default=0)
+    parser.add_argument('--max-candidate-wall-hits', type=int, default=0)
     parser.add_argument('--max-log-unsafe', type=int, default=0)
     parser.add_argument('--allow-losing-record', action='store_false', dest='require_winning_record')
     parser.set_defaults(require_winning_record=True)
@@ -288,6 +294,7 @@ def main():
             'max_edge100': args.max_edge100,
             'min_food100': args.min_food100,
             'max_candidate_deaths': args.max_candidate_deaths,
+            'max_candidate_wall_hits': args.max_candidate_wall_hits,
             'max_log_unsafe': args.max_log_unsafe,
             'require_winning_record': args.require_winning_record,
         }

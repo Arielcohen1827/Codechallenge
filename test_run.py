@@ -7,7 +7,7 @@ from dataclasses import replace
 import run
 from food_planner import FoodPlan, build_food_plan, choose_food_plan, should_commit_to_food, tempo_race_margin
 from move_search import rank_deep_moves
-from snake_state import GameState, legal_moves, temporal_shortest_path, track_snake
+from snake_state import GameState, legal_moves, shrink_wall, temporal_shortest_path, track_snake
 
 
 class FakeWebSocket:
@@ -184,6 +184,61 @@ class TestFoodFirstBrain(HistoryTestCase):
         self.assertEqual(len(after.body('A')), before_length)
         self.assertEqual(after.scores['A'], 51)
         self.assertEqual(after.multipliers['A'], 3)
+
+    def test_wall_hit_penalizes_without_moving_or_ending_game(self):
+        board = '|A#   B|\n|       |'
+        state = run.parse_state(turn(board, score_1=1000))
+        before = state.body('A')
+
+        after = run.apply_move(state, 'right', 'A')
+
+        self.assertEqual(state.walls, frozenset({(0, 1)}))
+        self.assertIn('right', run.legal_moves(state, 'A'))
+        self.assertEqual(after.body('A'), before)
+        self.assertEqual(after.scores['A'], 501)
+        self.assertEqual(after.side, 'B')
+
+    def test_wall_shrinks_at_b_round_end(self):
+        board = '|A      |\n| ##### |\n|    B  |'
+        state = run.parse_state(turn(board, side='B'))
+
+        after = run.apply_move(state, 'left', 'B')
+
+        self.assertEqual(after.walls, frozenset({(1, 2), (1, 3), (1, 4)}))
+        self.assertEqual(shrink_wall(after.walls), frozenset({(1, 3)}))
+        self.assertEqual(shrink_wall({(1, 3)}), frozenset())
+
+    def test_temporal_path_uses_wall_endpoint_after_it_shrinks(self):
+        state = GameState(
+            rows=3,
+            cols=6,
+            board=tuple(' ' * 6 for _ in range(3)),
+            side='A',
+            enemy='B',
+            snakes={'A': ((1, 0),), 'B': ((2, 5),)},
+            food=frozenset(),
+            scores={'A': 0, 'B': 0},
+            remaining_moves=20,
+            reliable_tails=frozenset({'A', 'B'}),
+            walls=frozenset({(1, 2), (1, 3), (1, 4)}),
+        )
+
+        self.assertEqual(
+            temporal_shortest_path(state, (1, 0), (1, 2), 'A'),
+            ((1, 0), (1, 1), (1, 2)),
+        )
+
+    def test_bot_avoids_wall_hit_when_open_move_exists(self):
+        board = '|A# 1 |\n|     |\n|    B|'
+
+        self.assertNotEqual(self.choose(board), 'right')
+
+    def test_wall_bump_remains_available_when_it_is_only_action(self):
+        board = '|aaaB|\n|aA# |\n|aaa |'
+        state = run.parse_state(turn(board))
+
+        self.assertEqual(run.legal_moves(state, 'A'), ['right'])
+        self.assertEqual(self.choose(board), 'right')
 
     def test_planner_targets_multiplier_or_correct_digit_never_wrong_digit(self):
         board = '|AX    |\n|      |\n|1 2345|\n|     B|'

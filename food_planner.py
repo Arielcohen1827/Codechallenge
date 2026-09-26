@@ -17,6 +17,7 @@ from snake_state import (
     neighbors,
     shortest_distance,
     shortest_path,
+    shrink_wall,
     step,
     temporal_shortest_distance,
     temporal_shortest_path,
@@ -56,10 +57,13 @@ class FoodPlan:
 def simulate_path_to_food(state, side, path):
     current = state
     for cell in path[1:]:
+        if cell in current.walls:
+            return None
         direction = direction_between(current.head(side), cell)
         if direction is None or direction not in legal_moves(current, side):
             return None
         current = apply_move(current, direction, side)
+        walls = shrink_wall(current.walls) if side == 'A' else current.walls
         current = GameState(
             rows=current.rows,
             cols=current.cols,
@@ -75,6 +79,7 @@ def simulate_path_to_food(state, side, path):
             next_food_digit=current.next_food_digit,
             pickups=current.pickups,
             multipliers=current.multipliers,
+            walls=walls,
         )
     return current
 
@@ -1249,6 +1254,7 @@ def move_quality_score(state, side, direction, plan=None, hunger=0, repeat_count
     weights = get_weights()
     tempo_hunger = hunger + score_gap_urgency(state, side)
     after = apply_move(state, direction, side)
+    wall_hit = step(state.head(side), direction) in state.walls
     head = after.head(side)
     if head is None:
         return (-999999, 0, 0, 0)
@@ -1285,7 +1291,8 @@ def move_quality_score(state, side, direction, plan=None, hunger=0, repeat_count
         - cycle_penalty
         + rival_penalty
         - hot_lost_penalty
-        - danger_penalty,
+        - danger_penalty
+        - (weights['fallback_wall_hit_penalty'] if wall_hit else 0),
         1 if head in state.food else 0,
         exits,
         min(len(region), 60),

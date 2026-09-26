@@ -32,6 +32,7 @@ def state_key(state):
         state.next_food_digit,
         tuple(sorted(state.pickups)),
         tuple(sorted(state.multipliers.items())),
+        tuple(sorted(state.walls)),
         state.remaining_moves,
         tuple(sorted(state.reliable_tails)),
     )
@@ -256,6 +257,8 @@ def static_after_move_score(state, side, direction, plan, hunger, repeat_count, 
         score += weights['deep_pickup_now_bonus']
     elif target in state.wrong_food():
         score -= weights['deep_wrong_food_penalty']
+    elif target in state.walls:
+        score -= weights['deep_wall_hit_penalty']
     if plan is not None and plan.race_margin < 0 and direction == plan.first_move:
         score -= weights['deep_lost_plan_step_penalty']
     return score
@@ -277,6 +280,8 @@ def best_reply_score(state, side, cache):
             score += get_weights()['deep_pickup_now_bonus']
         elif target in state.wrong_food():
             score -= get_weights()['deep_wrong_food_penalty']
+        elif target in state.walls:
+            score -= get_weights()['deep_wall_hit_penalty']
         best = max(best, score)
     return best
 
@@ -305,6 +310,7 @@ def two_ply_score(state, side, direction, plan, hunger, repeat_count, cache):
     for enemy_move in enemy_moves:
         enemy_target = None if enemy_head is None else step(enemy_head, enemy_move)
         enemy_food = enemy_target in after.objective_cells() if enemy_target is not None else False
+        enemy_wall_hit = enemy_target in after.walls if enemy_target is not None else False
         after_enemy = cache.apply(after, enemy, enemy_move)
         our_replies = cache.legal_moves(after_enemy, side)
         forced_loss = not our_replies
@@ -315,6 +321,8 @@ def two_ply_score(state, side, direction, plan, hunger, repeat_count, cache):
                 reply_score -= after.food_reward(enemy, enemy_target) * weights['deep_score_point_value']
             elif enemy_target in after.pickups:
                 reply_score -= weights['deep_enemy_pickup_penalty']
+        if enemy_wall_hit:
+            reply_score += weights['deep_enemy_wall_hit_bonus']
         # Terminal survival is lexicographic. A rival reply that leaves us no
         # legal move must always be treated as worse than any playable state,
         # regardless of the heuristic score accumulated before it.
@@ -327,6 +335,7 @@ def two_ply_score(state, side, direction, plan, hunger, repeat_count, cache):
                 'reply_score': reply_score,
                 'our_replies': len(our_replies),
                 'enemy_food': enemy_food,
+                'enemy_wall_hit': enemy_wall_hit,
                 'forced_loss': forced_loss,
             }
     return immediate + (worst or 0), worst_info
@@ -381,6 +390,7 @@ def rank_deep_moves(state, side, legal, plan=None, hunger=0, repeat_count=0, cac
                 'safety': cache.safety_class(after, side)[0],
                 'replies': len(cache.legal_moves(after, side)),
                 'food_now': after.head(side) in state.objective_cells(),
+                'wall_hit': step(state.head(side), direction) in state.walls,
                 'voronoi_score': voronoi['score'],
                 'voronoi_ours': voronoi['ours'],
                 'voronoi_enemy': voronoi['enemy'],
@@ -432,6 +442,7 @@ def deep_sort_key(item):
         0 if item.get('safety') == 'SUICIDAL' else 1,
         item['score'],
         1 if item['food_now'] else 0,
+        0 if item.get('wall_hit') else 1,
         item['our_replies'],
         item['exits'],
         item['region'],

@@ -323,6 +323,7 @@ class SnakeBrain:
             tuple(sorted(state.food_values.items())),
             tuple(sorted(state.pickups)),
             tuple(sorted(state.multipliers.items())),
+            tuple(sorted(state.walls)),
             self.targets.get((game_id, state.side)),
         )
         self.recent_states.setdefault(game_id, deque(maxlen=80)).append(key)
@@ -335,6 +336,7 @@ class SnakeBrain:
             tuple(sorted(state.food_values.items())),
             tuple(sorted(state.pickups)),
             tuple(sorted(state.multipliers.items())),
+            tuple(sorted(state.walls)),
             self.targets.get((game_id, state.side)),
         )
         return sum(1 for item in self.recent_states.get(game_id, ()) if item == key)
@@ -357,6 +359,7 @@ class SnakeBrain:
             'numbered_food': sorted((pos, value) for pos, value in state.food_values.items()),
             'next_food_digit': state.next_food_digit,
             'pickups': sorted(state.pickups),
+            'walls': sorted(state.walls),
             'multipliers': state.multipliers,
             'legal': legal,
             'scores': state.scores,
@@ -437,6 +440,7 @@ class SnakeBrain:
                     'rival_penalty': rival_response_penalty(state, side, direction),
                     'hot_lost_food_penalty': hot_lost_food_penalty(state, side, direction),
                     'wrong_food_penalty': step(state.head(side), direction) in state.wrong_food(),
+                    'wall_hit': step(state.head(side), direction) in state.walls,
                     'rival_stats': rival_response_stats(state, side, direction),
                 }
             )
