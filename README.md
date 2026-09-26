@@ -24,9 +24,9 @@ The server then sends events and the bot replies with actions (JSON):
 | `your_turn`    | plays a move — replies `move` with the move data + the `turn_token`  |
 | `game_over`    | nothing (the match ended)                                            |
 
-> The example move logic in `run.py` plays **Connect 4** (it picks a random
-> column). That `process_your_turn` / `process_move` part is exactly where you
-> put your own strategy — and where you adapt it to another game's action shape.
+`run.py` uses the competitive Snake strategy in this repository. It supports
+variable 12-20 row/column boards, numbered food and permanent multiplier
+pickups.
 
 ## Requirements
 
@@ -89,7 +89,8 @@ selected. They are not sent to the server.
 `bot_lab.py` runs repeatable local checks for the Snake bot without connecting
 to the Code Challenge server.
 
-Run deterministic self-play simulations:
+Run deterministic v4 self-play simulations. Board dimensions are randomized
+between 12 and 20 for every seed unless `--rows` and `--cols` are supplied:
 
 ```bash
 python bot_lab.py simulate --games 10 --seed 1 --turns 120
@@ -109,9 +110,11 @@ python bot_lab.py logs game_*.log --max-positions 300
 
 Useful metrics:
 
-- `food_per_100_turns`: how often the bot is eating.
+- `food_per_100_turns`: how often the bot eats the correct numbered food.
 - `avg_score_A` / `avg_score_B`: real game score, using `+1` per move and
-  `+100` per food.
+  `digit * 100 * multiplier` for correct food.
+- `pickups_A` / `pickups_B`: multiplier pickups collected.
+- `wrong_digits_A` / `wrong_digits_B`: penalized digits eaten.
 - `edge_moves_per_100_turns`: how often it goes to border/corner positions.
 - `avg_center_score`: whether it is tending toward center control.
 - `safety_SAFE` / `safety_ACCEPTABLE_RISK`: immediate safety classification of
@@ -153,6 +156,24 @@ In optimizer output:
 - `game_score` is the candidate's real average game score.
 - `diff` is candidate score minus opponent score.
 - `w` is candidate wins over candidate games.
+
+By default, each seed is played twice:
+
+- candidate as A vs default as B
+- default as A vs candidate as B
+
+That mirror test makes the comparison less dependent on starting side. Use
+`--no-mirror-seeds` only for quick rough experiments.
+
+Validated search mode keeps running batches until it finds a candidate that
+beats the thresholds, and only activates weights when the candidate passes:
+
+```bash
+python optimize_weights.py --until-improvement --trials 30 --max-batches 6 --games 6 --turns 150 --logs game_*.log --max-log-positions 300 --min-diff 80 --max-edge100 50 --activate
+```
+
+If no candidate passes, it still writes `weights/best_weights.json`, but does
+not write `weights/active_weights.json`.
 
 ## Write your own bot
 

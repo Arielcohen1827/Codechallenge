@@ -1,5 +1,5 @@
 from collections import deque
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 
 
 DIRS = {
@@ -11,6 +11,11 @@ DIRS = {
 
 FOOD_SCORE = 100
 NORMAL_SCORE = 1
+WRONG_FOOD_PENALTY = -500
+MULTIPLIER_PICKUP_SCORE = 50
+CRASH_PENALTY = -500
+RIVAL_CRASH_REWARD = 1000
+NEVER_RELEASE = 10_000
 
 
 @dataclass(frozen=True)
@@ -25,6 +30,10 @@ class GameState:
     scores: dict[str, int]
     remaining_moves: int
     reliable_tails: frozenset[str] = frozenset()
+    food_values: dict[tuple[int, int], int] = field(default_factory=dict)
+    next_food_digit: int | None = None
+    pickups: frozenset[tuple[int, int]] = frozenset()
+    multipliers: dict[str, int] = field(default_factory=lambda: {'A': 1, 'B': 1})
 
     def head(self, side):
         snake = self.snakes.get(side, ())
@@ -38,6 +47,31 @@ class GameState:
         for snake in self.snakes.values():
             cells.update(snake)
         return cells
+
+    def wrong_food(self):
+        return frozenset(set(self.food_values) - set(self.food))
+
+    def objective_cells(self):
+        return frozenset(set(self.food) | set(self.pickups))
+
+    def food_reward(self, side, pos):
+        digit = self.food_values.get(pos)
+        base = FOOD_SCORE if digit is None else digit * FOOD_SCORE
+        return base * max(1, self.multipliers.get(side, 1))
+
+    def numbered_sequence(self, limit=5):
+        if self.next_food_digit is None or not self.food_values:
+            return ()
+        positions_by_digit = {digit: pos for pos, digit in self.food_values.items()}
+        ordered = []
+        for offset in range(9):
+            digit = cyclic_digit(self.next_food_digit, offset)
+            pos = positions_by_digit.get(digit)
+            if pos is not None:
+                ordered.append((digit, pos))
+                if len(ordered) >= limit:
+                    break
+        return tuple(ordered)
 
 
 def parse_board(board_text, rows=None, cols=None):
@@ -60,18 +94,44 @@ def parse_board(board_text, rows=None, cols=None):
 
 
 def parse_state(data, previous_snakes=None):
-    board, rows, cols = parse_board(data.get('board', ''), data.get('rows'), data.get('cols'))
+    raw_rows = data.get('rows')
+    raw_cols = data.get('cols')
+    if (raw_rows is None or raw_cols is None) and data.get('board_size'):
+        try:
+            size_rows, size_cols = str(data['board_size']).lower().split('x', 1)
+            raw_rows = raw_rows if raw_rows is not None else int(size_rows.strip())
+            raw_cols = raw_cols if raw_cols is not None else int(size_cols.strip())
+        except (TypeError, ValueError):
+            pass
+    board, rows, cols = parse_board(data.get('board', ''), raw_rows, raw_cols)
     side = normalize_side(data.get('side'), board)
     enemy = 'B' if side == 'A' else 'A'
     scores = {
         'A': int(data.get('score_1', data.get('score_A', 0)) or 0),
         'B': int(data.get('score_2', data.get('score_B', 0)) or 0),
     }
-    food = frozenset(
+    legacy_food = frozenset(
         (r, c)
         for r, row in enumerate(board)
         for c, ch in enumerate(row)
         if ch == '*'
+    )
+    food_values = {
+        (r, c): int(ch)
+        for r, row in enumerate(board)
+        for c, ch in enumerate(row)
+        if ch in '123456789'
+    }
+    next_food_digit = find_next_food_digit(food_values.values())
+    numbered_target = {
+        pos for pos, digit in food_values.items() if digit == next_food_digit
+    }
+    food = frozenset(numbered_target if food_values else legacy_food)
+    pickups = frozenset(
+        (r, c)
+        for r, row in enumerate(board)
+        for c, ch in enumerate(row)
+        if ch == 'X'
     )
     snakes = {
         'A': reconstruct_snake(board, 'A'),
@@ -96,7 +156,28 @@ def parse_state(data, previous_snakes=None):
         scores=scores,
         remaining_moves=int(data.get('remaining_moves', 0) or 0),
         reliable_tails=frozenset(reliable),
+        food_values=food_values,
+        next_food_digit=next_food_digit,
+        pickups=pickups,
+        multipliers={
+            'A': max(1, int(data.get('multiplier_1', data.get('multiplier_A', 1)) or 1)),
+            'B': max(1, int(data.get('multiplier_2', data.get('multiplier_B', 1)) or 1)),
+        },
     )
+
+
+def cyclic_digit(value, offset=1):
+    return ((int(value) - 1 + offset) % 9) + 1
+
+
+def find_next_food_digit(values):
+    present = {int(value) for value in values}
+    if not present:
+        return None
+    candidates = [digit for digit in present if cyclic_digit(digit, -1) not in present]
+    if len(candidates) == 1:
+        return candidates[0]
+    return min(candidates or present)
 
 
 def normalize_side(raw_side, board):
@@ -151,7 +232,15 @@ def track_snake(previous, board, side):
     head = snake_head(board, side)
     if head is None or not cells:
         return ()
-    if not previous or not previous[0] or manhattan(head, previous[0]) != 1:
+    if not previous or not previous[0]:
+        return None
+
+    # Each SnakeBrain sees the board again only after the rival has moved.
+    # Its own already-committed body is therefore often unchanged verbatim.
+    if head == previous[0] and len(previous) == len(cells) and set(previous) == cells:
+        return tuple(previous)
+
+    if manhattan(head, previous[0]) != 1:
         return None
 
     same_length = (head,) + tuple(previous[:-1])
@@ -235,12 +324,9 @@ def legal_moves(state, side=None):
             blocked.discard(snake[-1])
         if target in blocked:
             continue
-        after = apply_move(state, direction, side)
-        head = after.head(side)
-        if head is None:
-            continue
-        if len(after.body(side)) > 2 and count_exits(after, side) == 0:
-            continue
+        # A move that leaves no exit next turn is still legal. Keeping it in
+        # the move tree matters because a rival can use exactly that move to
+        # close our last escape before it ever has to move again.
         legal.append(direction)
     return legal
 
@@ -252,11 +338,34 @@ def apply_move(state, direction, side=None):
         return state
     target = step(snake[0], direction)
     eats = target in state.food
+    wrong_food = target in state.food_values and not eats
+    takes_pickup = target in state.pickups
     new_snake = (target,) + snake if eats else (target,) + snake[:-1]
     snakes = dict(state.snakes)
     snakes[side] = new_snake
     scores = dict(state.scores)
-    scores[side] = scores.get(side, 0) + (FOOD_SCORE if eats else NORMAL_SCORE)
+    multipliers = dict(state.multipliers)
+    move_score = NORMAL_SCORE
+    if eats:
+        move_score += state.food_reward(side, target)
+    elif wrong_food:
+        move_score += WRONG_FOOD_PENALTY
+    elif takes_pickup:
+        move_score += MULTIPLIER_PICKUP_SCORE
+        multipliers[side] = max(1, multipliers.get(side, 1)) + 1
+    scores[side] = scores.get(side, 0) + move_score
+
+    food_values = dict(state.food_values)
+    if target in food_values:
+        food_values.pop(target, None)
+    next_food_digit = state.next_food_digit
+    if eats and next_food_digit is not None:
+        next_food_digit = cyclic_digit(next_food_digit)
+    if food_values and next_food_digit is None:
+        next_food_digit = find_next_food_digit(food_values.values())
+    food = frozenset(
+        pos for pos, digit in food_values.items() if digit == next_food_digit
+    ) if food_values else frozenset(state.food - {target})
     return GameState(
         rows=state.rows,
         cols=state.cols,
@@ -264,21 +373,90 @@ def apply_move(state, direction, side=None):
         side=state.enemy if side == state.side else state.side,
         enemy=side,
         snakes=snakes,
-        food=frozenset(state.food - {target}) if eats else state.food,
+        food=food,
         scores=scores,
         remaining_moves=max(0, state.remaining_moves - 1),
         reliable_tails=state.reliable_tails | {side},
+        food_values=food_values,
+        next_food_digit=next_food_digit,
+        pickups=frozenset(state.pickups - {target}) if takes_pickup else state.pickups,
+        multipliers=multipliers,
     )
 
 
 def blocked_for_path(state, side):
     blocked = state.occupied()
+    blocked.update(state.wrong_food())
     snake = state.body(side)
     if snake:
         blocked.discard(snake[0])
         if side in state.reliable_tails:
             blocked.discard(snake[-1])
     return blocked
+
+
+def release_times(state):
+    releases = {}
+    for snake_side in ('A', 'B'):
+        snake = state.body(snake_side)
+        if not snake:
+            continue
+        reliable = snake_side in state.reliable_tails
+        for index, cell in enumerate(snake):
+            if reliable:
+                releases[cell] = min(releases.get(cell, NEVER_RELEASE), len(snake) - index)
+            else:
+                releases[cell] = NEVER_RELEASE
+    return releases
+
+
+def temporal_shortest_path(state, start, goal, side, max_time=None):
+    if start is None or goal is None:
+        return None
+    if start == goal:
+        return (start,)
+
+    snake = state.body(side)
+    blocked_release = release_times(state)
+    for cell in state.wrong_food():
+        if cell != goal:
+            blocked_release[cell] = NEVER_RELEASE
+    blocked_release[start] = 0
+    max_time = max_time or state.rows * state.cols
+    q = deque([start])
+    distance = {start: 0}
+    parent = {start: None}
+
+    while q:
+        current = q.popleft()
+        time = distance[current]
+        if time >= max_time:
+            continue
+        for nb in neighbors(current, state.rows, state.cols):
+            next_time = time + 1
+            if time == 0 and len(snake) > 1 and nb == snake[1]:
+                continue
+            release_time = blocked_release.get(nb, 0)
+            if release_time > next_time:
+                continue
+            if nb in parent:
+                continue
+            parent[nb] = current
+            distance[nb] = next_time
+            if nb == goal:
+                path = [nb]
+                cursor = current
+                while cursor is not None:
+                    path.append(cursor)
+                    cursor = parent[cursor]
+                return tuple(reversed(path))
+            q.append(nb)
+    return None
+
+
+def temporal_shortest_distance(state, start, goal, side, max_time=None):
+    path = temporal_shortest_path(state, start, goal, side, max_time)
+    return None if path is None else len(path) - 1
 
 
 def shortest_path(state, start, goal, side):

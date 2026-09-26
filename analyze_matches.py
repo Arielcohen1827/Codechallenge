@@ -45,6 +45,9 @@ def state_signature(state):
         tuple(state.snakes.get(state.side, ())),
         tuple(state.snakes.get(state.enemy, ())),
         tuple(sorted(state.food)),
+        tuple(sorted(state.food_values.items())),
+        tuple(sorted(state.pickups)),
+        tuple(sorted(state.multipliers.items())),
     )
 
 
@@ -84,7 +87,7 @@ def analyze(path):
 
         plan = choose_food_plan(state, side)
         target = plan.food if plan else None
-        if previous_target is not None and target != previous_target and previous_target in state.food:
+        if previous_target is not None and target != previous_target and previous_target in state.objective_cells():
             target_changes += 1
             if plan and plan.safety in ('SAFE', 'ACCEPTABLE_RISK'):
                 target_abandoned += 1
@@ -149,6 +152,13 @@ def analyze(path):
                             metrics['hard_adjacent_food_rejected'] += 1
                         elif soft_pressure:
                             metrics['soft_adjacent_food_rejected'] += 1
+
+        if head is not None:
+            target_cell = step(head, direction)
+            if target_cell in state.pickups:
+                metrics['multiplier_pickups_us'] += 1
+            elif target_cell in state.wrong_food():
+                metrics['wrong_digits_us'] += 1
 
         after = apply_move(state, direction, side)
         if score_food_delta(state, after, side):

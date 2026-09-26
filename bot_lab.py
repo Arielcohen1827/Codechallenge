@@ -15,7 +15,16 @@ from food_planner import (
     position_control_penalty,
 )
 from snake_brain import SnakeBrain
-from snake_state import GameState, apply_move, legal_moves, parse_state, step
+from snake_state import (
+    CRASH_PENALTY,
+    RIVAL_CRASH_REWARD,
+    GameState,
+    apply_move,
+    cyclic_digit,
+    legal_moves,
+    parse_state,
+    step,
+)
 
 
 DIRECTIONS = {'up', 'down', 'left', 'right'}
@@ -31,6 +40,10 @@ class SimResult:
     score_b: int
     foods_a: int
     foods_b: int
+    pickups_a: int
+    pickups_b: int
+    wrong_digits_a: int
+    wrong_digits_b: int
     no_legal_side: str | None
     edge_moves: int
     center_score_total: int
@@ -38,8 +51,14 @@ class SimResult:
 
 def render_board(state):
     board = [[' ' for _ in range(state.cols)] for _ in range(state.rows)]
-    for r, c in state.food:
-        board[r][c] = '*'
+    if state.food_values:
+        for (r, c), digit in state.food_values.items():
+            board[r][c] = str(digit)
+    else:
+        for r, c in state.food:
+            board[r][c] = '*'
+    for r, c in state.pickups:
+        board[r][c] = 'X'
     for side in ('A', 'B'):
         body = state.body(side)
         for index, (r, c) in enumerate(reversed(body)):
@@ -55,24 +74,41 @@ def make_turn_data(state, game_id, turn_index):
         'board': render_board(state),
         'rows': state.rows,
         'cols': state.cols,
+        'board_size': f'{state.rows}x{state.cols}',
         'score_1': state.scores.get('A', 0),
         'score_2': state.scores.get('B', 0),
         'remaining_moves': state.remaining_moves,
+        'multiplier_1': state.multipliers.get('A', 1),
+        'multiplier_2': state.multipliers.get('B', 1),
     }
 
 
-def spawn_food(state, rng, food_count):
+def spawn_food(state, rng, food_count, numbered=True, pickup_count=2):
     occupied = state.occupied()
     food = set(state.food)
+    food_values = dict(state.food_values)
+    pickups = set(state.pickups)
     empties = [
         (r, c)
         for r in range(state.rows)
         for c in range(state.cols)
-        if (r, c) not in occupied and (r, c) not in food
+        if (r, c) not in occupied and (r, c) not in food_values and (r, c) not in food and (r, c) not in pickups
     ]
     rng.shuffle(empties)
-    while len(food) < food_count and empties:
-        food.add(empties.pop())
+    next_digit = state.next_food_digit or 1
+    if numbered:
+        desired = [cyclic_digit(next_digit, offset) for offset in range(food_count)]
+        existing = set(food_values.values())
+        for digit in desired:
+            if digit not in existing and empties:
+                food_values[empties.pop()] = digit
+                existing.add(digit)
+        food = {pos for pos, digit in food_values.items() if digit == next_digit}
+    else:
+        while len(food) < food_count and empties:
+            food.add(empties.pop())
+    while len(pickups) < pickup_count and empties:
+        pickups.add(empties.pop())
     return GameState(
         rows=state.rows,
         cols=state.cols,
@@ -84,10 +120,14 @@ def spawn_food(state, rng, food_count):
         scores=state.scores,
         remaining_moves=state.remaining_moves,
         reliable_tails=state.reliable_tails,
+        food_values=food_values,
+        next_food_digit=next_digit if numbered else None,
+        pickups=frozenset(pickups),
+        multipliers=state.multipliers,
     )
 
 
-def initial_state(seed, rows=15, cols=15, food_count=3, max_turns=300):
+def initial_state(seed, rows=15, cols=15, food_count=5, max_turns=300, numbered=True):
     rng = random.Random(seed)
     middle = rows // 2
     snakes = {
@@ -105,8 +145,10 @@ def initial_state(seed, rows=15, cols=15, food_count=3, max_turns=300):
         scores={'A': 0, 'B': 0},
         remaining_moves=max_turns,
         reliable_tails=frozenset({'A', 'B'}),
+        next_food_digit=1 if numbered else None,
+        multipliers={'A': 1, 'B': 1},
     )
-    return spawn_food(state, rng, food_count)
+    return spawn_food(state, rng, food_count, numbered=numbered)
 
 
 def winner_for(state, dead_side=None):
@@ -121,8 +163,10 @@ def winner_for(state, dead_side=None):
     return 'A' if score_a > score_b else 'B'
 
 
-def simulate_game(seed, max_turns=300, rows=15, cols=15, food_count=3, weights_by_side=None, candidate_side=None):
+def simulate_game(seed, max_turns=300, rows=None, cols=None, food_count=5, weights_by_side=None, candidate_side=None):
     rng = random.Random(seed)
+    rows = rows or rng.randint(12, 20)
+    cols = cols or rng.randint(12, 20)
     state = initial_state(seed, rows, cols, food_count, max_turns)
     brains = {'A': SnakeBrain(enable_debug=False), 'B': SnakeBrain(enable_debug=False)}
     metrics = Counter()
@@ -134,15 +178,27 @@ def simulate_game(seed, max_turns=300, rows=15, cols=15, food_count=3, weights_b
             set_active_weights(weights_by_side[side])
         legal = legal_moves(state, side)
         if not legal:
+            enemy = state.enemy
+            final_scores = dict(state.scores)
+            final_scores[side] = final_scores.get(side, 0) + CRASH_PENALTY
+            final_scores[enemy] = final_scores.get(enemy, 0) + RIVAL_CRASH_REWARD
+            if final_scores.get('A', 0) == final_scores.get('B', 0):
+                winner = None
+            else:
+                winner = 'A' if final_scores.get('A', 0) > final_scores.get('B', 0) else 'B'
             return SimResult(
                 seed=seed,
                 candidate_side=candidate_side,
-                winner=winner_for(state, side),
+                winner=winner,
                 turns=turn_index,
-                score_a=state.scores.get('A', 0),
-                score_b=state.scores.get('B', 0),
+                score_a=final_scores.get('A', 0),
+                score_b=final_scores.get('B', 0),
                 foods_a=metrics['foods_A'],
                 foods_b=metrics['foods_B'],
+                pickups_a=metrics['pickups_A'],
+                pickups_b=metrics['pickups_B'],
+                wrong_digits_a=metrics['wrong_digits_A'],
+                wrong_digits_b=metrics['wrong_digits_B'],
                 no_legal_side=side,
                 edge_moves=metrics['edge_moves'],
                 center_score_total=metrics['center_score_total'],
@@ -159,9 +215,15 @@ def simulate_game(seed, max_turns=300, rows=15, cols=15, food_count=3, weights_b
 
         target = step(state.head(side), direction)
         ate = target in state.food
+        took_pickup = target in state.pickups
+        ate_wrong_digit = target in state.wrong_food()
         state = apply_move(state, direction, side)
         if ate:
             metrics[f'foods_{side}'] += 1
+        if took_pickup:
+            metrics[f'pickups_{side}'] += 1
+        if ate_wrong_digit:
+            metrics[f'wrong_digits_{side}'] += 1
         head = state.head(side)
         metrics['center_score_total'] += center_control_score(state, head)
         brain.commit_move(data, direction)
@@ -176,6 +238,10 @@ def simulate_game(seed, max_turns=300, rows=15, cols=15, food_count=3, weights_b
         score_b=state.scores.get('B', 0),
         foods_a=metrics['foods_A'],
         foods_b=metrics['foods_B'],
+        pickups_a=metrics['pickups_A'],
+        pickups_b=metrics['pickups_B'],
+        wrong_digits_a=metrics['wrong_digits_A'],
+        wrong_digits_b=metrics['wrong_digits_B'],
         no_legal_side=None,
         edge_moves=metrics['edge_moves'],
         center_score_total=metrics['center_score_total'],
@@ -189,6 +255,10 @@ def summarize_simulations(results):
     deaths = Counter(result.no_legal_side for result in results if result.no_legal_side)
     foods_a = sum(result.foods_a for result in results)
     foods_b = sum(result.foods_b for result in results)
+    pickups_a = sum(result.pickups_a for result in results)
+    pickups_b = sum(result.pickups_b for result in results)
+    wrong_digits_a = sum(result.wrong_digits_a for result in results)
+    wrong_digits_b = sum(result.wrong_digits_b for result in results)
     score_a = sum(result.score_a for result in results)
     score_b = sum(result.score_b for result in results)
     edge_moves = sum(result.edge_moves for result in results)
@@ -225,6 +295,10 @@ def summarize_simulations(results):
         'deaths_B': deaths['B'],
         'foods_A': foods_a,
         'foods_B': foods_b,
+        'pickups_A': pickups_a,
+        'pickups_B': pickups_b,
+        'wrong_digits_A': wrong_digits_a,
+        'wrong_digits_B': wrong_digits_b,
         'food_per_100_turns': round((foods_a + foods_b) * 100 / total_turns, 2) if total_turns else 0,
         'edge_moves_per_100_turns': round(edge_moves * 100 / total_turns, 2) if total_turns else 0,
         'avg_center_score': round(center_total / total_turns, 2) if total_turns else 0,
@@ -330,9 +404,9 @@ def main():
     sim.add_argument('--games', type=int, default=50)
     sim.add_argument('--seed', type=int, default=1)
     sim.add_argument('--turns', type=int, default=300)
-    sim.add_argument('--rows', type=int, default=15)
-    sim.add_argument('--cols', type=int, default=15)
-    sim.add_argument('--food', type=int, default=3)
+    sim.add_argument('--rows', type=int, default=0, help='0 chooses a random size from 12 to 20')
+    sim.add_argument('--cols', type=int, default=0, help='0 chooses a random size from 12 to 20')
+    sim.add_argument('--food', type=int, default=5)
     sim.add_argument('--json', action='store_true')
 
     logs = sub.add_parser('logs', help='reevaluate historical log positions with the current bot')
@@ -358,6 +432,8 @@ def main():
             print(f"wins_A: {summary['wins_A']}  wins_B: {summary['wins_B']}  draws: {summary['draws']}")
             print(f"deaths_A: {summary['deaths_A']}  deaths_B: {summary['deaths_B']}")
             print(f"foods_A: {summary['foods_A']}  foods_B: {summary['foods_B']}")
+            print(f"pickups_A: {summary['pickups_A']}  pickups_B: {summary['pickups_B']}")
+            print(f"wrong_digits_A: {summary['wrong_digits_A']}  wrong_digits_B: {summary['wrong_digits_B']}")
             print(f"food_per_100_turns: {summary['food_per_100_turns']}")
             print(f"edge_moves_per_100_turns: {summary['edge_moves_per_100_turns']}")
             print(f"avg_center_score: {summary['avg_center_score']}")
