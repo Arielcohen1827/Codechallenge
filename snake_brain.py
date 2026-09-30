@@ -2,6 +2,7 @@ from collections import Counter, deque
 
 from bot_weights import get_weights
 from food_planner import (
+    advantage_control_move,
     build_food_plan,
     build_sequence_setup_plans,
     classify_safety,
@@ -64,14 +65,26 @@ class SnakeBrain:
             self._remember(game_id, state)
             return kill
 
-        non_penalty_legal = [
+        clean_legal = [
             direction for direction in legal
             if step(state.head(side), direction) not in state.wrong_food()
+            and step(state.head(side), direction) not in state.walls
         ]
-        if non_penalty_legal:
-            if len(non_penalty_legal) != len(legal):
-                debug['avoided_wrong_digit_moves'] = sorted(set(legal) - set(non_penalty_legal))
-            legal = non_penalty_legal
+        if clean_legal:
+            avoided = set(legal) - set(clean_legal)
+            wrong_avoided = [
+                direction for direction in avoided
+                if step(state.head(side), direction) in state.wrong_food()
+            ]
+            wall_avoided = [
+                direction for direction in avoided
+                if step(state.head(side), direction) in state.walls
+            ]
+            if wrong_avoided:
+                debug['avoided_wrong_digit_moves'] = sorted(wrong_avoided)
+            if wall_avoided:
+                debug['avoided_wall_moves'] = sorted(wall_avoided)
+            legal = clean_legal
             debug['legal'] = legal
 
         current_target = self.targets.get((game_id, side))
@@ -100,6 +113,23 @@ class SnakeBrain:
 
         commit_to_plan = should_commit_to_food(plan, hunger, repeat_count) if plan else False
         debug['commit_to_plan'] = commit_to_plan
+
+        reference_move = plan.first_move if plan and commit_to_plan and plan.first_move in legal else None
+        advantage = advantage_control_move(
+            state,
+            side,
+            legal,
+            deep_moves,
+            reference_move=reference_move,
+            adjacent_food=bool(plan and plan.our_distance == 1),
+        )
+        debug['advantage_control'] = advantage
+        if advantage['active'] and advantage['override'] and advantage['direction'] in legal:
+            move = advantage['direction']
+            self.targets[(game_id, side)] = None
+            self._save_debug(game_id, debug, 'advantage_control', move)
+            self._remember(game_id, state)
+            return move
 
         if plan and commit_to_plan:
             self.targets[(game_id, side)] = plan.food

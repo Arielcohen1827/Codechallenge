@@ -28,6 +28,12 @@ The server then sends events and the bot replies with actions (JSON):
 variable 12-20 row/column boards, numbered food, permanent multiplier pickups,
 and the shrinking `#` wall from game version 5.
 
+The decision layer also includes a compact pure-Python search engine. It uses
+bitboards, iterative deepening, alpha-beta pruning, and a transposition table to
+look several alternating turns ahead under a strict per-move time budget. Its
+score can refine choices that passed the exact safety checks, but it cannot
+promote a move already classified as suicidal or a forced loss.
+
 ## Requirements
 
 - Python 3.9+
@@ -111,8 +117,9 @@ python bot_lab.py logs game_*.log --max-positions 300
 Useful metrics:
 
 - `food_per_100_turns`: how often the bot eats the correct numbered food.
-- `avg_score_A` / `avg_score_B`: real game score, using `+1` per move and
-  `digit * 100 * multiplier` for correct food.
+- `avg_score_A` / `avg_score_B`: real game score, using `+1` for an ordinary
+  move; special cells replace that point with their exact reward or penalty
+  (`digit * 100 * multiplier`, `+50`, or `-500`).
 - `pickups_A` / `pickups_B`: multiplier pickups collected.
 - `wrong_digits_A` / `wrong_digits_B`: penalized digits eaten.
 - `wall_hits_A` / `wall_hits_B`: penalized attempts to move into `#`.
@@ -124,8 +131,9 @@ Useful metrics:
 ## Weight Optimizer
 
 `optimize_weights.py` runs a reproducible random search over the bot's scoring
-weights. Each candidate plays against the default weights and alternates sides,
-so the optimizer can compare real game score and score difference.
+weights. It refines `weights/active_weights.json` when that file exists (or the
+defaults otherwise). Each candidate plays against that baseline and alternates
+sides, so the optimizer can compare real game score and score difference.
 
 Quick search:
 
@@ -148,6 +156,13 @@ Save and activate the best weights locally:
 python optimize_weights.py --trials 20 --games 4 --turns 100 --logs game_*.log --activate
 ```
 
+Refine only the score-lead control strategy without disturbing the other
+learned weights:
+
+```bash
+python optimize_weights.py --tune-advantage-only --trials 20 --games 4 --turns 150
+```
+
 The bot automatically loads `weights/active_weights.json` when present. Delete
 that file to return to the default weights in `bot_weights.py`.
 
@@ -157,6 +172,8 @@ In optimizer output:
 - `game_score` is the candidate's real average game score.
 - `diff` is candidate score minus opponent score.
 - `w` is candidate wins over candidate games.
+- `objective_improvement` is the optimizer score gained over the loaded
+  baseline; validated mode requires a positive minimum before activation.
 
 By default, each seed is played twice:
 

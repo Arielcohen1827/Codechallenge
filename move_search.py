@@ -19,6 +19,7 @@ from snake_state import (
     neighbors,
     step,
 )
+from search_engine import IterativeSearchEngine
 
 
 def state_key(state):
@@ -202,9 +203,7 @@ def position_score(state, side, cache):
         return cache.position[key]
 
     weights = get_weights()
-    safety, _, _, tail_ok = cache.safety_class(state, side)
-    region = cache.region_size(state, side)
-    exits = cache.exits_count(state, side)
+    safety, region, exits, tail_ok = cache.safety_class(state, side)
     replies = len(cache.legal_moves(state, side))
     body_len = len(state.body(side))
     voronoi = voronoi_control(state, side, cache)
@@ -379,15 +378,16 @@ def rank_deep_moves(state, side, legal, plan=None, hunger=0, repeat_count=0, cac
         score, info = two_ply_score(state, side, direction, plan, hunger, repeat_count, cache)
         after = cache.apply(state, side, direction)
         voronoi = voronoi_control(after, side, cache)
+        safety, region, exits, _ = cache.safety_class(after, side)
         analyses.append(
             {
                 'direction': direction,
                 'score': score,
                 'deep_score': score,
                 'extra_score': None,
-                'region': cache.region_size(after, side),
-                'exits': cache.exits_count(after, side),
-                'safety': cache.safety_class(after, side)[0],
+                'region': region,
+                'exits': exits,
+                'safety': safety,
                 'replies': len(cache.legal_moves(after, side)),
                 'food_now': after.head(side) in state.objective_cells(),
                 'wall_hit': step(state.head(side), direction) in state.walls,
@@ -413,6 +413,56 @@ def rank_deep_moves(state, side, legal, plan=None, hunger=0, repeat_count=0, cac
             item['extra_score'] = extra
             item['score'] += extra // 2
         analyses.sort(key=deep_sort_key, reverse=True)
+
+    engine, compact = IterativeSearchEngine.from_game_state(
+        state,
+        time_budget_ms=weights['iterative_search_time_ms'],
+        max_depth=weights['iterative_search_max_depth'],
+    )
+    search = engine.search(
+        compact,
+        side,
+        legal,
+        target=None if plan is None else plan.food,
+    )
+    for item in analyses:
+        item['search_score'] = search.scores.get(item['direction'])
+        item['search_adjustment'] = 0
+        item['search_depth'] = search.completed_depth
+        item['search_nodes'] = search.nodes
+        item['search_transposition_hits'] = search.transposition_hits
+        item['search_elapsed_ms'] = search.elapsed_ms
+    if search.completed_depth >= weights['iterative_search_min_apply_depth'] and search.scores:
+        applicable = [
+            item
+            for item in analyses
+            if item['search_score'] is not None
+            and item.get('safety') != 'SUICIDAL'
+            and not item.get('forced_loss')
+        ]
+        clipped_scores = {
+            item['direction']: max(-200_000, min(200_000, item['search_score']))
+            for item in applicable
+        }
+        center = (
+            sum(clipped_scores.values()) // len(clipped_scores)
+            if clipped_scores
+            else 0
+        )
+        for item in analyses:
+            search_score = clipped_scores.get(item['direction'])
+            if search_score is None:
+                continue
+            adjustment = (
+                (search_score - center)
+                * weights['iterative_search_weight_percent']
+                // 100
+            )
+            cap = weights['iterative_search_adjustment_cap']
+            adjustment = max(-cap, min(cap, adjustment))
+            item['search_adjustment'] = adjustment
+            item['score'] += adjustment
+        analyses.sort(key=deep_sort_key, reverse=True)
     prefer_safer_close_move(analyses)
     return analyses
 
@@ -423,6 +473,11 @@ def prefer_safer_close_move(analyses):
     weights = get_weights()
     best = analyses[0]
     for index, candidate in enumerate(analyses[1:], start=1):
+        if candidate.get('forced_loss') or candidate.get('safety') == 'SUICIDAL':
+            continue
+        if best.get('forced_loss') or best.get('safety') == 'SUICIDAL':
+            analyses.insert(0, analyses.pop(index))
+            return
         if best['score'] - candidate['score'] > weights['deep_safe_preference_margin']:
             continue
         best_mobility = best['our_replies'] + best['exits']

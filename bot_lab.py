@@ -46,6 +46,8 @@ class SimResult:
     wrong_digits_b: int
     wall_hits_a: int
     wall_hits_b: int
+    control_moves_a: int
+    control_moves_b: int
     no_legal_side: str | None
     edge_moves: int
     center_score_total: int
@@ -230,6 +232,8 @@ def simulate_game(seed, max_turns=300, rows=None, cols=None, food_count=5, weigh
                 wrong_digits_b=metrics['wrong_digits_B'],
                 wall_hits_a=metrics['wall_hits_A'],
                 wall_hits_b=metrics['wall_hits_B'],
+                control_moves_a=metrics['control_moves_A'],
+                control_moves_b=metrics['control_moves_B'],
                 no_legal_side=side,
                 edge_moves=metrics['edge_moves'],
                 center_score_total=metrics['center_score_total'],
@@ -239,6 +243,9 @@ def simulate_game(seed, max_turns=300, rows=None, cols=None, food_count=5, weigh
         brain = brains[side]
         direction = brain.choose_move(data)
         direction = brain.safe_direction(data, direction)
+        debug = brain.decision_debug(game_id) or {}
+        if debug.get('reason') == 'advantage_control':
+            metrics[f'control_moves_{side}'] += 1
         if direction not in legal:
             direction = legal[0]
         if position_control_penalty(state, side, direction) > 0:
@@ -278,6 +285,8 @@ def simulate_game(seed, max_turns=300, rows=None, cols=None, food_count=5, weigh
         wrong_digits_b=metrics['wrong_digits_B'],
         wall_hits_a=metrics['wall_hits_A'],
         wall_hits_b=metrics['wall_hits_B'],
+        control_moves_a=metrics['control_moves_A'],
+        control_moves_b=metrics['control_moves_B'],
         no_legal_side=None,
         edge_moves=metrics['edge_moves'],
         center_score_total=metrics['center_score_total'],
@@ -297,6 +306,8 @@ def summarize_simulations(results):
     wrong_digits_b = sum(result.wrong_digits_b for result in results)
     wall_hits_a = sum(result.wall_hits_a for result in results)
     wall_hits_b = sum(result.wall_hits_b for result in results)
+    control_moves_a = sum(result.control_moves_a for result in results)
+    control_moves_b = sum(result.control_moves_b for result in results)
     score_a = sum(result.score_a for result in results)
     score_b = sum(result.score_b for result in results)
     edge_moves = sum(result.edge_moves for result in results)
@@ -312,6 +323,14 @@ def summarize_simulations(results):
     )
     opponent_wall_hits = sum(
         result.wall_hits_b if result.candidate_side == 'A' else result.wall_hits_a
+        for result in candidate_results
+    )
+    candidate_control_moves = sum(
+        result.control_moves_a if result.candidate_side == 'A' else result.control_moves_b
+        for result in candidate_results
+    )
+    opponent_control_moves = sum(
+        result.control_moves_b if result.candidate_side == 'A' else result.control_moves_a
         for result in candidate_results
     )
     candidate_wins = sum(1 for result in candidate_results if result.winner == result.candidate_side)
@@ -347,6 +366,8 @@ def summarize_simulations(results):
         'wrong_digits_B': wrong_digits_b,
         'wall_hits_A': wall_hits_a,
         'wall_hits_B': wall_hits_b,
+        'control_moves_A': control_moves_a,
+        'control_moves_B': control_moves_b,
         'food_per_100_turns': round((foods_a + foods_b) * 100 / total_turns, 2) if total_turns else 0,
         'edge_moves_per_100_turns': round(edge_moves * 100 / total_turns, 2) if total_turns else 0,
         'avg_center_score': round(center_total / total_turns, 2) if total_turns else 0,
@@ -364,6 +385,8 @@ def summarize_simulations(results):
         'opponent_foods': opponent_foods,
         'candidate_wall_hits': candidate_wall_hits,
         'opponent_wall_hits': opponent_wall_hits,
+        'candidate_control_moves': candidate_control_moves,
+        'opponent_control_moves': opponent_control_moves,
     }
 
 
@@ -487,6 +510,7 @@ def main():
             print(f"pickups_A: {summary['pickups_A']}  pickups_B: {summary['pickups_B']}")
             print(f"wrong_digits_A: {summary['wrong_digits_A']}  wrong_digits_B: {summary['wrong_digits_B']}")
             print(f"wall_hits_A: {summary['wall_hits_A']}  wall_hits_B: {summary['wall_hits_B']}")
+            print(f"control_moves_A: {summary['control_moves_A']}  control_moves_B: {summary['control_moves_B']}")
             print(f"food_per_100_turns: {summary['food_per_100_turns']}")
             print(f"edge_moves_per_100_turns: {summary['edge_moves_per_100_turns']}")
             print(f"avg_center_score: {summary['avg_center_score']}")

@@ -270,6 +270,186 @@ def food_denial_score(state, side, food, our_distance, enemy_distance, rival_thr
     return score
 
 
+def advantage_control_context(state, side):
+    """Describe whether a score lead is large enough to defend positionally."""
+    weights = get_weights()
+    enemy = state.enemy if side == state.side else ('B' if side == 'A' else 'A')
+    lead = state.scores.get(side, 0) - state.scores.get(enemy, 0)
+    own_length = len(state.body(side))
+    enemy_length = len(state.body(enemy))
+    own_turns_left = max(
+        0,
+        (state.remaining_moves + (1 if side == state.side else 0)) // 2,
+    )
+
+    if state.food_values:
+        sequence = state.numbered_sequence(limit=2)
+        enemy_multiplier = max(1, state.multipliers.get(enemy, 1))
+        recoverable_threat = sum(
+            digit * FOOD_SCORE * enemy_multiplier for digit, _ in sequence
+        )
+    else:
+        recoverable_threat = min(2, len(state.food)) * FOOD_SCORE
+    recoverable_threat += min(2, len(state.pickups)) * 50
+    current_enemy_reward = max(
+        (state.food_reward(enemy, food) for food in state.food),
+        default=0,
+    )
+    crash_score_swing = RIVAL_CRASH_REWARD - CRASH_PENALTY
+    protected_lead = crash_score_swing + current_enemy_reward
+
+    dynamic_lead = (
+        recoverable_threat * weights['advantage_threat_ratio'] // 100
+        + weights['advantage_score_buffer']
+    )
+    activation_lead = max(
+        weights['advantage_min_lead'],
+        protected_lead,
+        min(weights['advantage_max_activation_lead'], dynamic_lead),
+    )
+    active = (
+        weights['advantage_control_enabled'] > 0
+        and bool(state.food)
+        and lead >= activation_lead
+        and own_length >= weights['advantage_min_body']
+        and own_length + weights['advantage_body_deficit'] >= enemy_length
+        and own_turns_left >= weights['advantage_min_own_turns']
+    )
+    return {
+        'active': active,
+        'lead': lead,
+        'activation_lead': activation_lead,
+        'recoverable_threat': recoverable_threat,
+        'current_enemy_reward': current_enemy_reward,
+        'protected_lead': protected_lead,
+        'own_length': own_length,
+        'enemy_length': enemy_length,
+        'own_turns_left': own_turns_left,
+    }
+
+
+def advantage_control_move(state, side, legal, deep_moves, reference_move=None, adjacent_food=False):
+    """Choose a safe move that delays the rival while preserving our mobility."""
+    context = advantage_control_context(state, side)
+    context['moves'] = []
+    context['direction'] = None
+    context['override'] = False
+    if not context['active'] or not deep_moves:
+        return context
+
+    weights = get_weights()
+    enemy = state.enemy if side == state.side else ('B' if side == 'A' else 'A')
+    enemy_head = state.head(enemy)
+    if enemy_head is None:
+        return context
+
+    enemy_distances = {
+        food: temporal_shortest_distance(state, enemy_head, food, enemy)
+        for food in state.food
+    }
+    reachable_food = [
+        (distance, food)
+        for food, distance in enemy_distances.items()
+        if distance is not None
+    ]
+    threatened_food = min(reachable_food)[1] if reachable_food else next(iter(state.food), None)
+    before_food_distance = enemy_distances.get(threatened_food)
+    baseline_enemy_moves = len(legal_moves(state, enemy))
+    context['baseline_enemy_moves'] = baseline_enemy_moves
+
+    analyses = {item['direction']: item for item in deep_moves}
+    candidates = []
+    for direction in legal:
+        analysis = analyses.get(direction)
+        if analysis is None:
+            continue
+        if analysis.get('forced_loss') or analysis.get('safety') != 'SAFE':
+            continue
+        if analysis.get('our_replies', 0) < 2 or analysis.get('exits', 0) < 2:
+            continue
+
+        after = apply_move(state, direction, side)
+        enemy_moves_after = len(legal_moves(after, enemy))
+        if enemy_moves_after == 0:
+            # forced_kill_move handles score-winning traps before this phase.
+            continue
+
+        secured_food = after.head(side) == threatened_food
+        after_food_distance = None
+        delay = 0
+        food_unreachable = False
+        if threatened_food is not None and not secured_food:
+            after_food_distance = temporal_shortest_distance(
+                after, after.head(enemy), threatened_food, enemy
+            )
+            if after_food_distance is None:
+                food_unreachable = True
+            elif before_food_distance is not None:
+                delay = max(-3, min(5, after_food_distance - before_food_distance))
+
+        score = analysis['score']
+        score += analysis.get('voronoi_ours', 0) * weights['advantage_our_cell_value']
+        score -= analysis.get('voronoi_enemy', 0) * weights['advantage_enemy_cell_value']
+        score += max(0, baseline_enemy_moves - enemy_moves_after) * weights['advantage_enemy_move_reduction']
+        score += delay * weights['advantage_food_delay_value']
+        if food_unreachable:
+            score += weights['advantage_food_unreachable_bonus']
+        if analysis.get('enemy_food'):
+            score -= weights['advantage_enemy_food_penalty']
+
+        candidates.append(
+            {
+                'direction': direction,
+                'score': score,
+                'enemy_moves': enemy_moves_after,
+                'enemy_food_distance_before': before_food_distance,
+                'enemy_food_distance_after': after_food_distance,
+                'food_delay': delay,
+                'food_unreachable': food_unreachable,
+                'secured_food': secured_food,
+                'meaningful_denial': (
+                    food_unreachable
+                    or delay > 0
+                    or enemy_moves_after < baseline_enemy_moves
+                ),
+                'voronoi_ours': analysis.get('voronoi_ours', 0),
+                'voronoi_enemy': analysis.get('voronoi_enemy', 0),
+            }
+        )
+
+    candidates.sort(key=lambda item: item['score'], reverse=True)
+    context['moves'] = candidates
+    if not candidates:
+        return context
+
+    best = candidates[0]
+    if not best['meaningful_denial']:
+        return context
+    reference = next(
+        (item for item in candidates if item['direction'] == reference_move),
+        None,
+    )
+    required_margin = weights['advantage_switch_margin']
+    if adjacent_food:
+        required_margin += weights['advantage_adjacent_food_switch_margin']
+    improvement = None if reference is None else best['score'] - reference['score']
+    should_use = reference_move is None or (
+        best['direction'] != reference_move
+        and (reference is None or improvement >= required_margin)
+    )
+    context.update(
+        {
+            'direction': best['direction'],
+            'reference_direction': reference_move,
+            'improvement': improvement,
+            'required_margin': required_margin,
+            'override': should_use,
+            'threatened_food': threatened_food,
+        }
+    )
+    return context
+
+
 def classify_safety(after, side):
     head = after.head(side)
     if head is None:

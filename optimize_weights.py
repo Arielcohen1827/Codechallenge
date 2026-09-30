@@ -5,7 +5,7 @@ import time
 from pathlib import Path
 
 from bot_lab import evaluate_log_decisions, expand_log_paths, simulate_game, summarize_simulations
-from bot_weights import DEFAULT_WEIGHTS, reset_active_weights, save_weights, set_active_weights
+from bot_weights import DEFAULT_WEIGHTS, load_weights, reset_active_weights, save_weights, set_active_weights
 
 
 TUNABLE_RANGES = {
@@ -29,6 +29,20 @@ TUNABLE_RANGES = {
     'rival_food_threat_value': (100, 1000),
     'rival_chain_threat_value': (60, 700),
     'rival_chain_ignore_penalty': (400, 4000),
+    'advantage_min_lead': (1200, 2600),
+    'advantage_max_activation_lead': (1800, 4000),
+    'advantage_threat_ratio': (40, 120),
+    'advantage_score_buffer': (500, 1600),
+    'advantage_min_body': (7, 12),
+    'advantage_body_deficit': (0, 4),
+    'advantage_enemy_cell_value': (50, 350),
+    'advantage_our_cell_value': (0, 120),
+    'advantage_enemy_move_reduction': (500, 5000),
+    'advantage_food_delay_value': (500, 5000),
+    'advantage_food_unreachable_bonus': (3000, 30_000),
+    'advantage_enemy_food_penalty': (5000, 45_000),
+    'advantage_switch_margin': (2500, 12_000),
+    'advantage_adjacent_food_switch_margin': (8000, 30_000),
     'current_target_bonus': (0, 3200),
     'safe_bonus': (700, 4000),
     'acceptable_risk_bonus': (-500, 1800),
@@ -62,17 +76,21 @@ TUNABLE_RANGES = {
     'fallback_danger_penalty': (3000, 20_000),
 }
 
+ADVANTAGE_TUNABLE_KEYS = tuple(
+    key for key in TUNABLE_RANGES if key.startswith('advantage_')
+)
 
-def random_candidate(rng):
-    weights = dict(DEFAULT_WEIGHTS)
-    for key, (low, high) in TUNABLE_RANGES.items():
+
+def random_candidate(base_weights, rng, tunable_ranges):
+    weights = dict(base_weights)
+    for key, (low, high) in tunable_ranges.items():
         weights[key] = rng.randint(low, high)
     return weights
 
 
-def mutate_candidate(base, rng, strength):
+def mutate_candidate(base, rng, strength, tunable_ranges):
     weights = dict(base)
-    for key, (low, high) in TUNABLE_RANGES.items():
+    for key, (low, high) in tunable_ranges.items():
         if rng.random() > 0.65:
             continue
         value = weights[key]
@@ -109,14 +127,14 @@ def log_score(summary):
     return food_rate * 90 - edge_rate * 18 - unsafe * 1200
 
 
-def evaluate_candidate(weights, args, log_paths):
+def evaluate_candidate(weights, baseline_weights, args, log_paths):
     results = []
     for offset in range(args.games):
         sides = ('A', 'B') if args.mirror_seeds else ('A' if offset % 2 == 0 else 'B',)
         for candidate_side in sides:
             weights_by_side = {
                 candidate_side: weights,
-                'B' if candidate_side == 'A' else 'A': DEFAULT_WEIGHTS,
+                'B' if candidate_side == 'A' else 'A': baseline_weights,
             }
             results.append(
                 simulate_game(
@@ -139,10 +157,12 @@ def evaluate_candidate(weights, args, log_paths):
     return score, sim_summary, log_summary
 
 
-def is_valid_improvement(record, args):
+def is_valid_improvement(record, args, baseline_score):
     sim = record['simulation']
     logs = record.get('logs') or {}
     unsafe_logs = logs.get('safety_DANGEROUS', 0) + logs.get('safety_SUICIDAL', 0)
+    if record['score'] < baseline_score + args.min_objective_improvement:
+        return False
     if sim['avg_candidate_score_diff'] < args.min_diff:
         return False
     if args.require_winning_record and sim['candidate_wins'] <= sim['candidate_losses']:
@@ -184,21 +204,32 @@ def print_candidate(rank, score, sim_summary, log_summary=None):
         )
 
 
-def make_candidate(index, best, rng):
+def make_candidate(index, best, base_weights, tunable_ranges, rng):
     if index == 1:
-        return dict(DEFAULT_WEIGHTS)
+        return dict(base_weights)
     if best and rng.random() < 0.55:
-        return mutate_candidate(best['weights'], rng, strength=0.30)
-    return random_candidate(rng)
+        return mutate_candidate(best['weights'], rng, strength=0.30, tunable_ranges=tunable_ranges)
+    return random_candidate(base_weights, rng, tunable_ranges)
 
 
-def run_batch(args, log_paths, rng, batch_index=1, previous_best=None):
+def run_batch(
+    args,
+    log_paths,
+    baseline_weights,
+    tunable_ranges,
+    rng,
+    batch_index=1,
+    previous_best=None,
+    baseline_score=None,
+):
     best = previous_best
     batch_best = None
     accepted = None
     for index in range(1, args.trials + 1):
-        weights = make_candidate(index, best, rng)
-        score, sim_summary, log_summary = evaluate_candidate(weights, args, log_paths)
+        weights = make_candidate(index, best, baseline_weights, tunable_ranges, rng)
+        score, sim_summary, log_summary = evaluate_candidate(weights, baseline_weights, args, log_paths)
+        if baseline_score is None:
+            baseline_score = score
         record = {
             'score': score,
             'weights': dict(weights),
@@ -208,7 +239,8 @@ def run_batch(args, log_paths, rng, batch_index=1, previous_best=None):
             'trial': index,
             'valid_improvement': False,
         }
-        record['valid_improvement'] = is_valid_improvement(record, args)
+        record['objective_improvement'] = round(score - baseline_score, 2)
+        record['valid_improvement'] = is_valid_improvement(record, args, baseline_score)
         if best is None or score > best['score']:
             best = record
         if batch_best is None or score > batch_best['score']:
@@ -225,7 +257,7 @@ def run_batch(args, log_paths, rng, batch_index=1, previous_best=None):
                     f"edge100={sim_summary['edge_moves_per_100_turns']} "
                     f"food100={sim_summary['food_per_100_turns']}"
                 )
-    return best, batch_best, accepted
+    return best, batch_best, accepted, baseline_score
 
 
 def main():
@@ -240,12 +272,15 @@ def main():
     parser.add_argument('--logs', nargs='*', default=())
     parser.add_argument('--max-log-positions', type=int, default=300)
     parser.add_argument('--output', default='weights/best_weights.json')
+    parser.add_argument('--base', default='weights/active_weights.json')
+    parser.add_argument('--tune-advantage-only', action='store_true')
     parser.add_argument('--activate', action='store_true')
     parser.add_argument('--no-mirror-seeds', action='store_false', dest='mirror_seeds')
     parser.set_defaults(mirror_seeds=True)
     parser.add_argument('--until-improvement', action='store_true')
     parser.add_argument('--max-batches', type=int, default=8)
     parser.add_argument('--min-diff', type=float, default=80)
+    parser.add_argument('--min-objective-improvement', type=float, default=50)
     parser.add_argument('--max-edge100', type=float, default=50)
     parser.add_argument('--min-food100', type=float, default=13)
     parser.add_argument('--max-candidate-deaths', type=int, default=0)
@@ -258,15 +293,31 @@ def main():
 
     rng = random.Random(args.seed)
     log_paths = expand_log_paths(args.logs) if args.logs else []
+    baseline_weights = load_weights(args.base) if args.base and Path(args.base).exists() else dict(DEFAULT_WEIGHTS)
+    tunable_ranges = (
+        {key: TUNABLE_RANGES[key] for key in ADVANTAGE_TUNABLE_KEYS}
+        if args.tune_advantage_only
+        else TUNABLE_RANGES
+    )
     best = None
     accepted = None
+    baseline_score = None
 
     started = time.time()
     batches = args.max_batches if args.until_improvement else 1
     for batch_index in range(1, batches + 1):
         if args.until_improvement and not args.json:
             print(f"batch {batch_index}/{batches}")
-        best, _, accepted = run_batch(args, log_paths, rng, batch_index, best)
+        best, _, accepted, baseline_score = run_batch(
+            args,
+            log_paths,
+            baseline_weights,
+            tunable_ranges,
+            rng,
+            batch_index,
+            best,
+            baseline_score,
+        )
         if accepted:
             best = accepted
             break
@@ -283,6 +334,9 @@ def main():
         'best_weights_path': args.output,
         'active_weights_path': active_path,
         'accepted_improvement': bool(accepted),
+        'baseline_path': args.base if args.base and Path(args.base).exists() else None,
+        'tuning_scope': 'advantage_control' if args.tune_advantage_only else 'all',
+        'objective_improvement': best.get('objective_improvement', 0),
         'mirror_seeds': args.mirror_seeds,
         'elapsed_seconds': round(time.time() - started, 2),
         'simulation': best['simulation'],
@@ -291,6 +345,7 @@ def main():
     if args.until_improvement:
         result['acceptance_thresholds'] = {
             'min_diff': args.min_diff,
+            'min_objective_improvement': args.min_objective_improvement,
             'max_edge100': args.max_edge100,
             'min_food100': args.min_food100,
             'max_candidate_deaths': args.max_candidate_deaths,

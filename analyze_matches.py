@@ -234,6 +234,9 @@ def print_report(path, metrics):
         'no_legal_moves',
         'rival_collision',
         'illegal_moves_repaired',
+        'wall_hits_us',
+        'wrong_digits_us',
+        'multiplier_pickups_us',
     ]:
         print(f"  {key}: {metrics[key]}")
     if metrics['bot_notes']:

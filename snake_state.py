@@ -363,13 +363,13 @@ def apply_move(state, direction, side=None):
     multipliers = dict(state.multipliers)
     move_score = NORMAL_SCORE
     if hits_wall:
-        move_score += WALL_HIT_PENALTY
+        move_score = WALL_HIT_PENALTY
     elif eats:
-        move_score += state.food_reward(side, target)
+        move_score = state.food_reward(side, target)
     elif wrong_food:
-        move_score += WRONG_FOOD_PENALTY
+        move_score = WRONG_FOOD_PENALTY
     elif takes_pickup:
-        move_score += MULTIPLIER_PICKUP_SCORE
+        move_score = MULTIPLIER_PICKUP_SCORE
         multipliers[side] = max(1, multipliers.get(side, 1)) + 1
     scores[side] = scores.get(side, 0) + move_score
 

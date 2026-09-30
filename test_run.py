@@ -5,8 +5,17 @@ import unittest
 from dataclasses import replace
 
 import run
-from food_planner import FoodPlan, build_food_plan, choose_food_plan, should_commit_to_food, tempo_race_margin
+from food_planner import (
+    FoodPlan,
+    advantage_control_context,
+    advantage_control_move,
+    build_food_plan,
+    choose_food_plan,
+    should_commit_to_food,
+    tempo_race_margin,
+)
 from move_search import rank_deep_moves
+from search_engine import IterativeSearchEngine
 from snake_state import GameState, legal_moves, shrink_wall, temporal_shortest_path, track_snake
 
 
@@ -155,7 +164,7 @@ class TestFoodFirstBrain(HistoryTestCase):
         after = run.apply_move(state, 'right', 'A')
 
         self.assertEqual(len(after.body('A')), before_length + 1)
-        self.assertEqual(after.scores['A'], 201)
+        self.assertEqual(after.scores['A'], 200)
         self.assertEqual(after.next_food_digit, 2)
 
     def test_wrong_number_penalizes_without_growth(self):
@@ -166,7 +175,7 @@ class TestFoodFirstBrain(HistoryTestCase):
         after = run.apply_move(state, 'right', 'A')
 
         self.assertEqual(len(after.body('A')), before_length)
-        self.assertEqual(after.scores['A'], -499)
+        self.assertEqual(after.scores['A'], -500)
         self.assertEqual(after.next_food_digit, 1)
 
     def test_bot_avoids_wrong_digit_when_another_move_is_available(self):
@@ -182,7 +191,7 @@ class TestFoodFirstBrain(HistoryTestCase):
         after = run.apply_move(state, 'right', 'A')
 
         self.assertEqual(len(after.body('A')), before_length)
-        self.assertEqual(after.scores['A'], 51)
+        self.assertEqual(after.scores['A'], 50)
         self.assertEqual(after.multipliers['A'], 3)
 
     def test_wall_hit_penalizes_without_moving_or_ending_game(self):
@@ -195,7 +204,7 @@ class TestFoodFirstBrain(HistoryTestCase):
         self.assertEqual(state.walls, frozenset({(0, 1)}))
         self.assertIn('right', run.legal_moves(state, 'A'))
         self.assertEqual(after.body('A'), before)
-        self.assertEqual(after.scores['A'], 501)
+        self.assertEqual(after.scores['A'], 500)
         self.assertEqual(after.side, 'B')
 
     def test_wall_shrinks_at_b_round_end(self):
@@ -239,6 +248,68 @@ class TestFoodFirstBrain(HistoryTestCase):
 
         self.assertEqual(run.legal_moves(state, 'A'), ['right'])
         self.assertEqual(self.choose(board), 'right')
+
+    def test_wrong_digit_is_compared_against_wall_when_both_are_penalties(self):
+        board = (
+            '| # 34|\n'
+            '|aA2 5|\n'
+            '|aa1 B|'
+        )
+
+        self.assertEqual(self.choose(board), 'right')
+
+    def test_advantage_control_activates_only_with_a_defensible_lead(self):
+        board = (
+            '|###1###|\n'
+            '|aaA    |\n'
+            '|a  Bbbb|\n'
+            '|a      |\n'
+            '|a      |\n'
+            '|a      |\n'
+            '|a      |'
+        )
+        leading = run.parse_state(turn(board, score_1=2200, score_2=0, remaining=100))
+        close = replace(leading, scores={'A': 300, 'B': 0})
+
+        self.assertTrue(advantage_control_context(leading, 'A')['active'])
+        self.assertFalse(advantage_control_context(close, 'A')['active'])
+
+    def test_advantage_control_occupies_food_chokepoint(self):
+        board = (
+            '|###1###|\n'
+            '|aaA    |\n'
+            '|a  Bbbb|\n'
+            '|a      |\n'
+            '|a      |\n'
+            '|a      |\n'
+            '|a      |'
+        )
+        state = run.parse_state(turn(board, score_1=2200, score_2=0, remaining=100))
+        analyses = [
+            {
+                'direction': direction,
+                'score': 0,
+                'forced_loss': False,
+                'safety': 'SAFE',
+                'our_replies': 3,
+                'exits': 3,
+                'enemy_food': False,
+                'voronoi_ours': 10,
+                'voronoi_enemy': 10,
+            }
+            for direction in ('down', 'right')
+        ]
+
+        control = advantage_control_move(
+            state,
+            'A',
+            ['down', 'right'],
+            analyses,
+        )
+
+        self.assertTrue(control['active'])
+        self.assertEqual(control['direction'], 'right')
+        self.assertGreater(control['moves'][0]['food_delay'], 0)
 
     def test_planner_targets_multiplier_or_correct_digit_never_wrong_digit(self):
         board = '|AX    |\n|      |\n|1 2345|\n|     B|'
@@ -892,6 +963,124 @@ class TestFoodFirstBrain(HistoryTestCase):
         data = turn('|A   |\n|    |\n|   B|')
 
         self.assertIn(run.final_safe_direction(data, 'left'), {'right', 'down'})
+
+
+class TestIterativeSearchEngine(unittest.TestCase):
+    def assert_transition_matches(self, state, direction):
+        engine, compact = IterativeSearchEngine.from_game_state(state)
+        expected = run.apply_move(state, direction, state.side)
+        actual = engine.apply_move(compact, direction)
+
+        self.assertEqual(
+            set(engine.legal_moves(compact)),
+            set(run.legal_moves(state, state.side)),
+        )
+        self.assertEqual(actual.side, 0 if expected.side == 'A' else 1)
+        self.assertEqual(actual.scores, (expected.scores['A'], expected.scores['B']))
+        self.assertEqual(
+            actual.multipliers,
+            (expected.multipliers['A'], expected.multipliers['B']),
+        )
+        self.assertEqual(actual.remaining_moves, expected.remaining_moves)
+        self.assertEqual(
+            tuple(engine.cell(cell) for cell in actual.bodies[0]),
+            expected.body('A'),
+        )
+        self.assertEqual(
+            tuple(engine.cell(cell) for cell in actual.bodies[1]),
+            expected.body('B'),
+        )
+        self.assertEqual(
+            {engine.cell(cell) for cell in actual.walls},
+            set(expected.walls),
+        )
+        self.assertEqual(
+            {engine.cell(cell) for cell in actual.food},
+            set(expected.food),
+        )
+        self.assertEqual(
+            {engine.cell(cell) for cell in actual.pickups},
+            set(expected.pickups),
+        )
+        self.assertEqual(actual.next_food_digit or None, expected.next_food_digit)
+
+    def test_compact_transition_matches_numbered_food_rules(self):
+        state = run.parse_state(turn(
+            '|A1 23|\n'
+            '| X45B|',
+            multiplier_1=2,
+            multiplier_2=1,
+        ))
+
+        self.assert_transition_matches(state, 'right')
+
+    def test_compact_transition_matches_multiplier_rules(self):
+        state = run.parse_state(turn(
+            '|AX 12|\n'
+            '|345 B|',
+            multiplier_1=2,
+            multiplier_2=1,
+        ))
+
+        self.assert_transition_matches(state, 'right')
+
+    def test_compact_transition_matches_wall_hit_and_shrink(self):
+        state = run.parse_state(turn(
+            '|A     |\n'
+            '|  B###|',
+            side='B',
+            score_1=100,
+            score_2=1000,
+        ))
+
+        self.assert_transition_matches(state, 'right')
+
+    def test_iterative_search_completes_useful_depth_within_budget(self):
+        state = run.parse_state(turn(
+            '|       1|\n'
+            '|        |\n'
+            '|  A     |\n'
+            '|        |\n'
+            '|    X   |\n'
+            '|        |\n'
+            '|     B  |\n'
+            '|2       |',
+            remaining=180,
+        ))
+        engine, compact = IterativeSearchEngine.from_game_state(
+            state,
+            time_budget_ms=90,
+            max_depth=6,
+        )
+        legal = run.legal_moves(state, state.side)
+
+        result = engine.search(compact, state.side, legal, target=next(iter(state.food)))
+
+        self.assertGreaterEqual(result.completed_depth, 4)
+        self.assertEqual(set(result.scores), set(legal))
+        self.assertLess(result.elapsed_ms, 250)
+
+    def test_search_ends_by_score_before_next_turn_death(self):
+        state = GameState(
+            rows=3,
+            cols=3,
+            board=('Bb ', 'aa*', ' aA'),
+            side='A',
+            enemy='B',
+            snakes={
+                'A': ((2, 2), (2, 1), (1, 1), (1, 0)),
+                'B': ((0, 0), (0, 1)),
+            },
+            food=frozenset({(1, 2)}),
+            scores={'A': 0, 'B': 800},
+            remaining_moves=1,
+            reliable_tails=frozenset({'A', 'B'}),
+        )
+        engine, compact = IterativeSearchEngine.from_game_state(state)
+
+        result = engine.search(compact, 'A', ['up'], target=(1, 2))
+
+        self.assertLess(result.scores['up'], 0)
 
 
 if __name__ == '__main__':

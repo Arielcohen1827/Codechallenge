@@ -11,12 +11,13 @@ Run the Snake bot separately so it can accept/play the games.
     game: "snake",
     roundIntervalMs: 60_000,
     maxSimultaneousGames: 25,
+    maxTotalGames: 30,
     assumedGameDurationMs: 8 * 60_000,
     debugMode: false,
     dryRun: false,
   };
 
-  const STORE_KEY = "codechallenge_auto_challenger_charmander_v2";
+  const STORE_KEY = "codechallenge_auto_challenger_charmander_v3";
   const same = (a, b) => String(a || "").trim().toLowerCase() === String(b || "").trim().toLowerCase();
   const norm = (name) => String(name || "").trim().toLowerCase();
 
@@ -35,10 +36,12 @@ Run the Snake bot separately so it can accept/play the games.
     localStorage.setItem(STORE_KEY, JSON.stringify(state));
   };
 
+  const storedState = loadState();
   const state = {
-    trackedGames: [],
-    ...loadState(),
+    trackedGames: storedState.trackedGames || [],
+    totalSent: 0,
   };
+  saveState(state);
 
   const panel = document.createElement("div");
   panel.style.cssText = [
@@ -180,6 +183,7 @@ Run the Snake bot separately so it can accept/play the games.
       opponent: botName,
       sentAt: now,
     });
+    state.totalSent += 1;
     saveState(state);
   };
 
@@ -225,9 +229,17 @@ Run the Snake bot separately so it can accept/play the games.
 
       const active = activeGameCount(doc, now);
       const slots = Math.max(0, CONFIG.maxSimultaneousGames - active);
+      const remaining = Math.max(0, CONFIG.maxTotalGames - state.totalSent);
       const targets = challengeTargets(online);
-      const selected = targets.slice(0, slots);
-      statusEl.textContent = `Online: ${targets.length} rivales | activas: ${active}/${CONFIG.maxSimultaneousGames} | a enviar: ${selected.length}`;
+      const selected = targets.slice(0, Math.min(slots, remaining));
+      statusEl.textContent = `Enviadas: ${state.totalSent}/${CONFIG.maxTotalGames} | online: ${targets.length} | activas: ${active}/${CONFIG.maxSimultaneousGames}`;
+
+      if (!remaining) {
+        stopped = true;
+        statusEl.textContent = `Completado: ${state.totalSent}/${CONFIG.maxTotalGames} desafios enviados.`;
+        log("limite total alcanzado; el script se detuvo");
+        return;
+      }
 
       if (!slots) {
         log(`limite alcanzado: ${active}/${CONFIG.maxSimultaneousGames}; espero la proxima ronda`);
@@ -243,6 +255,11 @@ Run the Snake bot separately so it can accept/play the games.
           trackSentGame(bot.name, now);
         }
       }));
+      if (state.totalSent >= CONFIG.maxTotalGames) {
+        stopped = true;
+        statusEl.textContent = `Completado: ${state.totalSent}/${CONFIG.maxTotalGames} desafios enviados.`;
+        log("30 desafios enviados; el script se detuvo automaticamente");
+      }
     } catch (error) {
       log(`error: ${error.message || error}`);
     } finally {
