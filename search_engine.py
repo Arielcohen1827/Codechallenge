@@ -250,7 +250,12 @@ class IterativeSearchEngine:
         scores[side] += move_score
 
         next_digit = state.next_food_digit
-        if not hits_wall and target in food_values:
+        eaten_digit = food_values.get(target)
+        if eats and not hits_wall and eaten_digit is not None:
+            food_values = {
+                cell: digit for cell, digit in food_values.items() if digit != eaten_digit
+            }
+        elif not hits_wall and target in food_values:
             food_values.pop(target, None)
         if eats and not hits_wall and next_digit:
             next_digit = cyclic_digit(next_digit)

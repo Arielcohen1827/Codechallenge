@@ -36,6 +36,7 @@ class GameState:
     pickups: frozenset[tuple[int, int]] = frozenset()
     multipliers: dict[str, int] = field(default_factory=lambda: {'A': 1, 'B': 1})
     walls: frozenset[tuple[int, int]] = frozenset()
+    food_copy_targets: dict[int, int] = field(default_factory=dict)
 
     def head(self, side):
         snake = self.snakes.get(side, ())
@@ -64,13 +65,29 @@ class GameState:
     def numbered_sequence(self, limit=5):
         if self.next_food_digit is None or not self.food_values:
             return ()
-        positions_by_digit = {digit: pos for pos, digit in self.food_values.items()}
+        head = self.head(self.side)
+        ordered = []
+        for digit, positions in self.numbered_groups(limit=limit):
+            if head is None:
+                pos = positions[0]
+            else:
+                pos = min(positions, key=lambda cell: (manhattan(head, cell), cell))
+            ordered.append((digit, pos))
+        return tuple(ordered)
+
+    def numbered_groups(self, limit=5):
+        """Return each ordered digit with every currently available copy."""
+        if self.next_food_digit is None or not self.food_values:
+            return ()
+        positions_by_digit = {}
+        for pos, digit in self.food_values.items():
+            positions_by_digit.setdefault(digit, []).append(pos)
         ordered = []
         for offset in range(9):
             digit = cyclic_digit(self.next_food_digit, offset)
-            pos = positions_by_digit.get(digit)
-            if pos is not None:
-                ordered.append((digit, pos))
+            positions = positions_by_digit.get(digit)
+            if positions:
+                ordered.append((digit, tuple(sorted(positions))))
                 if len(ordered) >= limit:
                     break
         return tuple(ordered)
@@ -124,6 +141,10 @@ def parse_state(data, previous_snakes=None):
         for c, ch in enumerate(row)
         if ch in '123456789'
     }
+    food_copy_targets = {
+        digit: sum(1 for value in food_values.values() if value == digit)
+        for digit in set(food_values.values())
+    }
     next_food_digit = find_next_food_digit(food_values.values())
     numbered_target = {
         pos for pos, digit in food_values.items() if digit == next_food_digit
@@ -172,6 +193,7 @@ def parse_state(data, previous_snakes=None):
             'B': max(1, int(data.get('multiplier_2', data.get('multiplier_B', 1)) or 1)),
         },
         walls=walls,
+        food_copy_targets=food_copy_targets,
     )
 
 
@@ -374,7 +396,16 @@ def apply_move(state, direction, side=None):
     scores[side] = scores.get(side, 0) + move_score
 
     food_values = dict(state.food_values)
-    if not hits_wall and target in food_values:
+    food_copy_targets = dict(state.food_copy_targets)
+    eaten_digit = food_values.get(target)
+    if eats and not hits_wall and eaten_digit is not None:
+        food_values = {
+            pos: digit for pos, digit in food_values.items() if digit != eaten_digit
+        }
+        food_copy_targets.pop(eaten_digit, None)
+    elif not hits_wall and target in food_values:
+        # A wrong digit only consumes the touched copy. The server respawns its
+        # replacement at an unknown position on the following real board.
         food_values.pop(target, None)
     next_food_digit = state.next_food_digit
     if eats and not hits_wall and next_food_digit is not None:
@@ -401,6 +432,7 @@ def apply_move(state, direction, side=None):
         pickups=frozenset(state.pickups - {target}) if takes_pickup and not hits_wall else state.pickups,
         multipliers=multipliers,
         walls=walls,
+        food_copy_targets=food_copy_targets,
     )
 
 

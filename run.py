@@ -19,6 +19,7 @@ from snake_state import apply_move, legal_moves, parse_state, step
 # A running text log of events received / actions sent per game, written to
 # games/game_<game_id>.log when the match ends.
 LOG_DIR = Path('games')
+LIVE_DIR = LOG_DIR / 'live'
 HISTORY = {}
 LOGGED_META = set()
 BOT = SnakeBrain()
@@ -66,6 +67,36 @@ def write_game_log(game_id):
         print(f"could not write game log: {e}")
 
 
+def write_live_snapshot(game_id, data, status='playing', decision=None, direction=None):
+    """Publish the latest server board for the local live viewer."""
+    try:
+        LIVE_DIR.mkdir(parents=True, exist_ok=True)
+        safe_id = ''.join(ch for ch in str(game_id) if ch.isalnum() or ch in '-_')
+        if not safe_id:
+            return
+        turn_number = sum(
+            1
+            for line in HISTORY.get(game_id, ())
+            if line.startswith('< ') and '"event": "your_turn"' in line
+        )
+        payload = {
+            'game_id': str(game_id),
+            'status': status,
+            'updated_at': time.time(),
+            'turn_number': turn_number,
+            'bot_version': BOT_VERSION,
+            'turn_data': data,
+            'decision': decision,
+            'direction': direction,
+        }
+        path = LIVE_DIR / f'game_{safe_id}.json'
+        temporary = path.with_suffix('.tmp')
+        temporary.write_text(json.dumps(payload), encoding='utf-8')
+        temporary.replace(path)
+    except OSError as e:
+        print(f"could not write live snapshot: {e}")
+
+
 async def send(websocket, action, data):
     message = json.dumps(
         {
@@ -100,6 +131,14 @@ async def on_game_over(websocket, request_data):
     game_id = request_data['data'].get('game_id')
     if game_id:
         log_event(game_id, request_data)
+        decision = BOT.decision_debug(game_id)
+        write_live_snapshot(
+            game_id,
+            request_data['data'],
+            status='finished',
+            decision=decision,
+            direction=(decision or {}).get('direction'),
+        )
         BOT.forget(game_id)
         write_game_log(game_id)
         LOGGED_META.discard(game_id)
@@ -164,6 +203,12 @@ async def process_move(websocket, request_data):
         'direction': direction,
     }
     log_action(move['game_id'], {'action': 'move', 'data': move})
+    write_live_snapshot(
+        move['game_id'],
+        data,
+        decision=debug,
+        direction=direction,
+    )
     await send(websocket, 'move', move)
 
 

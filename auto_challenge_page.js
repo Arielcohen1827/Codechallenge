@@ -11,7 +11,7 @@ Run the Snake bot separately so it can accept/play the games.
     game: "snake",
     roundIntervalMs: 60_000,
     maxSimultaneousGames: 25,
-    maxTotalGames: 30,
+    maxTotalGames: 10,
     assumedGameDurationMs: 8 * 60_000,
     debugMode: false,
     dryRun: false,
@@ -258,7 +258,7 @@ Run the Snake bot separately so it can accept/play the games.
       if (state.totalSent >= CONFIG.maxTotalGames) {
         stopped = true;
         statusEl.textContent = `Completado: ${state.totalSent}/${CONFIG.maxTotalGames} desafios enviados.`;
-        log("30 desafios enviados; el script se detuvo automaticamente");
+        log(`${CONFIG.maxTotalGames} desafios enviados; el script se detuvo automaticamente`);
       }
     } catch (error) {
       log(`error: ${error.message || error}`);

@@ -1,0 +1,93 @@
+<!doctype html>
+<html lang="es">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Snake Live</title>
+  <link rel="stylesheet" href="/styles.css">
+</head>
+<body>
+  <header class="topbar">
+    <div class="brand">
+      <span class="brand-mark" aria-hidden="true"></span>
+      <div>
+        <h1>Snake Live</h1>
+        <p id="version">Esperando telemetria</p>
+      </div>
+    </div>
+    <div class="connection"><span id="connection-dot"></span><span id="connection-label">Conectando</span></div>
+  </header>
+
+  <main class="workspace">
+    <aside class="games-panel">
+      <div class="panel-heading">
+        <h2>Partidas</h2>
+        <span id="live-count">0 activas</span>
+      </div>
+      <div id="game-list" class="game-list" aria-live="polite"></div>
+    </aside>
+
+    <section class="match-panel">
+      <div id="empty-state" class="empty-state">
+        <div class="empty-board" aria-hidden="true"></div>
+        <h2>Sin partidas registradas</h2>
+        <p>El tablero aparecera cuando Charmander reciba su proximo turno.</p>
+      </div>
+
+      <div id="match-content" class="match-content" hidden>
+        <div class="match-head">
+          <div>
+            <div class="status-line">
+              <span id="match-status" class="status-badge">EN JUEGO</span>
+              <span id="game-id"></span>
+            </div>
+            <h2 id="match-title">Partida</h2>
+          </div>
+          <div class="turn-meta">
+            <span>Turno <strong id="turn-number">0</strong></span>
+            <span>Restantes <strong id="remaining-moves">0</strong></span>
+          </div>
+        </div>
+
+        <div class="scoreboard">
+          <div class="player player-a">
+            <span class="player-side">A</span>
+            <div><strong id="player-a">Jugador A</strong><span id="multiplier-a">x1</span></div>
+            <b id="score-a">0</b>
+          </div>
+          <div class="score-divider">VS</div>
+          <div class="player player-b">
+            <span class="player-side">B</span>
+            <div><strong id="player-b">Jugador B</strong><span id="multiplier-b">x1</span></div>
+            <b id="score-b">0</b>
+          </div>
+        </div>
+
+        <div class="play-area">
+          <div class="board-shell">
+            <div id="board" class="board" role="img" aria-label="Tablero de la partida"></div>
+          </div>
+          <aside class="decision-panel">
+            <div class="decision-heading"><span>Decision</span><b id="direction">-</b></div>
+            <dl>
+              <div><dt>Motivo</dt><dd id="reason">-</dd></div>
+              <div><dt>Objetivo</dt><dd id="target">-</dd></div>
+              <div><dt>Proximo numero</dt><dd id="next-digit">-</dd></div>
+              <div><dt>Seguridad</dt><dd id="safety">-</dd></div>
+              <div><dt>Movimientos legales</dt><dd id="legal-moves">-</dd></div>
+            </dl>
+            <div class="legend" aria-label="Leyenda">
+              <span><i class="legend-a"></i> A</span>
+              <span><i class="legend-b"></i> B</span>
+              <span><i class="legend-target"></i> Objetivo</span>
+              <span><i class="legend-x"></i> Multiplicador</span>
+              <span><i class="legend-wall"></i> Muro</span>
+            </div>
+          </aside>
+        </div>
+      </div>
+    </section>
+  </main>
+  <script src="/app.js"></script>
+</body>
+</html>

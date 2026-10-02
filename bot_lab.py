@@ -95,6 +95,7 @@ def spawn_food(state, rng, food_count, numbered=True, pickup_count=2):
     food_values = dict(state.food_values)
     pickups = set(state.pickups)
     walls = set(state.walls)
+    food_copy_targets = dict(state.food_copy_targets)
     empties = [
         (r, c)
         for r in range(state.rows)
@@ -105,11 +106,15 @@ def spawn_food(state, rng, food_count, numbered=True, pickup_count=2):
     next_digit = state.next_food_digit or 1
     if numbered:
         desired = [cyclic_digit(next_digit, offset) for offset in range(food_count)]
-        existing = set(food_values.values())
+        food_copy_targets = {
+            digit: food_copy_targets.get(digit, rng.randint(3, 5))
+            for digit in desired
+        }
         for digit in desired:
-            if digit not in existing and empties:
+            existing_count = sum(1 for value in food_values.values() if value == digit)
+            while existing_count < food_copy_targets[digit] and empties:
                 food_values[empties.pop()] = digit
-                existing.add(digit)
+                existing_count += 1
         food = {pos for pos, digit in food_values.items() if digit == next_digit}
     else:
         while len(food) < food_count and empties:
@@ -134,6 +139,7 @@ def spawn_food(state, rng, food_count, numbered=True, pickup_count=2):
         pickups=frozenset(pickups),
         multipliers=state.multipliers,
         walls=frozenset(walls),
+        food_copy_targets=food_copy_targets,
     )
 
 
@@ -178,6 +184,7 @@ def initial_state(seed, rows=15, cols=15, food_count=5, max_turns=300, numbered=
         reliable_tails=frozenset({'A', 'B'}),
         next_food_digit=1 if numbered else None,
         multipliers={'A': 1, 'B': 1},
+        food_copy_targets={},
     )
     return spawn_food(state, rng, food_count, numbered=numbered)
 

@@ -90,6 +90,11 @@ class TestProtocol(InTempDirTestCase, unittest.IsolatedAsyncioTestCase):
         self.assertEqual(websocket.sent[0]['action'], 'move')
         self.assertEqual(websocket.sent[0]['data']['direction'], 'right')
         self.assertIn('turn_token', websocket.sent[0]['data'])
+        live_path = os.path.join(self.tmpdir.name, 'games', 'live', 'game_g_1.json')
+        with open(live_path, encoding='utf-8') as file:
+            snapshot = json.load(file)
+        self.assertEqual(snapshot['direction'], 'right')
+        self.assertEqual(snapshot['turn_data']['board'], '|A* |\n|   |\n|  B|')
 
     async def test_full_match_is_logged_in_order(self):
         websocket = FakeWebSocket([
@@ -166,6 +171,47 @@ class TestFoodFirstBrain(HistoryTestCase):
         self.assertEqual(len(after.body('A')), before_length + 1)
         self.assertEqual(after.scores['A'], 200)
         self.assertEqual(after.next_food_digit, 2)
+
+    def test_correct_copy_removes_every_copy_and_advances_once(self):
+        board = '|A1 12|\n|1 23B|\n| 345 |'
+        state = run.parse_state(turn(board))
+        before_length = len(state.body('A'))
+
+        self.assertEqual(state.food, frozenset({(0, 1), (0, 3), (1, 0)}))
+        after = run.apply_move(state, 'right', 'A')
+
+        self.assertEqual(len(after.body('A')), before_length + 1)
+        self.assertEqual(after.scores['A'], 100)
+        self.assertNotIn(1, after.food_values.values())
+        self.assertEqual(after.next_food_digit, 2)
+        self.assertEqual(
+            after.food,
+            frozenset(pos for pos, digit in after.food_values.items() if digit == 2),
+        )
+
+    def test_wrong_copy_only_removes_the_touched_cell(self):
+        board = '|A2 12|\n|2 34B|\n| 5 2 |'
+        state = run.parse_state(turn(board))
+        before_copies = sum(value == 2 for value in state.food_values.values())
+
+        after = run.apply_move(state, 'right', 'A')
+
+        self.assertEqual(after.scores['A'], -500)
+        self.assertEqual(after.next_food_digit, 1)
+        self.assertNotIn((0, 1), after.food_values)
+        self.assertEqual(
+            sum(value == 2 for value in after.food_values.values()),
+            before_copies - 1,
+        )
+
+    def test_numbered_groups_preserve_all_copies(self):
+        board = '|A1 12|\n|1 23B|\n| 345 |'
+        state = run.parse_state(turn(board))
+
+        groups = state.numbered_groups(limit=2)
+
+        self.assertEqual(groups[0], (1, ((0, 1), (0, 3), (1, 0))))
+        self.assertEqual(groups[1], (2, ((0, 4), (1, 2))))
 
     def test_wrong_number_penalizes_without_growth(self):
         board = '|A2 34|\n|1  5B|'
@@ -1006,8 +1052,9 @@ class TestIterativeSearchEngine(unittest.TestCase):
 
     def test_compact_transition_matches_numbered_food_rules(self):
         state = run.parse_state(turn(
-            '|A1 23|\n'
-            '| X45B|',
+            '|A1 12|\n'
+            '|1X23B|\n'
+            '| 345 |',
             multiplier_1=2,
             multiplier_2=1,
         ))

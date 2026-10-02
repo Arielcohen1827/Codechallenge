@@ -26,7 +26,8 @@ The server then sends events and the bot replies with actions (JSON):
 
 `run.py` uses the competitive Snake strategy in this repository. It supports
 variable 12-20 row/column boards, numbered food, permanent multiplier pickups,
-and the shrinking `#` wall from game version 5.
+the shrinking `#` wall, and the 3-5 copies of every numbered food introduced
+in game version 6.
 
 The decision layer also includes a compact pure-Python search engine. It uses
 bitboards, iterative deepening, alpha-beta pruning, and a transposition table to
@@ -90,12 +91,25 @@ The `?` lines are local-only decision diagnostics. They include legal moves, the
 chosen food plan, candidate move penalties, rival pressure, and why the move was
 selected. They are not sent to the server.
 
+## Live match viewer
+
+While `run.py` is playing, it writes the latest state of every match to
+`games/live/`. Start the local viewer in another terminal:
+
+```bash
+python match_viewer.py
+```
+
+Then open `http://127.0.0.1:8765`. The page refreshes every 750 ms and shows all
+active/recent matches, scores, multipliers, the current target digit, and the
+bot's latest decision. The viewer is local and never receives the bot token.
+
 ## Offline bot lab
 
 `bot_lab.py` runs repeatable local checks for the Snake bot without connecting
 to the Code Challenge server.
 
-Run deterministic v5 self-play simulations. Board dimensions are randomized
+Run deterministic v6 self-play simulations. Board dimensions are randomized
 between 12 and 20 for every seed unless `--rows` and `--cols` are supplied:
 
 ```bash

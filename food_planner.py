@@ -80,6 +80,7 @@ def simulate_path_to_food(state, side, path):
             pickups=current.pickups,
             multipliers=current.multipliers,
             walls=walls,
+            food_copy_targets=current.food_copy_targets,
         )
     return current
 
@@ -118,6 +119,30 @@ def tempo_race_margin(state, side, our_distance, enemy_distance):
     return margin
 
 
+def best_numbered_copy(state, side, positions):
+    """Choose the copy we can contest best, accounting for move order."""
+    head = state.head(side)
+    if head is None:
+        return None
+    enemy = state.enemy if side == state.side else ('B' if side == 'A' else 'A')
+    enemy_head = state.head(enemy)
+    candidates = []
+    for food in positions:
+        path = temporal_shortest_path(state, head, food, side)
+        if path is None:
+            continue
+        our_distance = len(path) - 1
+        enemy_distance = None
+        if enemy_head is not None:
+            enemy_distance = temporal_shortest_distance(state, enemy_head, food, enemy)
+        margin = tempo_race_margin(state, side, our_distance, enemy_distance)
+        candidates.append((margin, -our_distance, food, path, enemy_distance))
+    if not candidates:
+        return None
+    margin, neg_distance, food, path, enemy_distance = max(candidates)
+    return food, path, -neg_distance, enemy_distance, margin
+
+
 def wins_food_race(state, side, our_distance, enemy_distance):
     return tempo_race_margin(state, side, our_distance, enemy_distance) >= 0
 
@@ -139,11 +164,12 @@ def nearest_next_food_distance(state, side, consumed_food, distances=None):
     if head is None:
         return None
     if state.food_values:
-        sequence = state.numbered_sequence(limit=1)
-        if not sequence:
-            return None
-        path = temporal_shortest_path(state, head, sequence[0][1], side)
-        return None if path is None else len(path) - 1
+        candidate_distances = []
+        for food in state.food:
+            path = temporal_shortest_path(state, head, food, side)
+            if path is not None:
+                candidate_distances.append(len(path) - 1)
+        return min(candidate_distances) if candidate_distances else None
     distances = distances if distances is not None else distance_map(state, head, side)
     food_distances = [
         distances.get(food)
@@ -165,20 +191,15 @@ def food_chain_score(state, side, consumed_food, hunger, distances=None):
         current = state
         total = 0
         for rank in range(3):
-            sequence = current.numbered_sequence(limit=1)
-            if not sequence:
+            if current.next_food_digit is None or not current.food:
                 break
-            digit, food = sequence[0]
-            current_head = current.head(side)
-            path = temporal_shortest_path(current, current_head, food, side)
-            if path is None or len(path) < 2:
+            choice = best_numbered_copy(current, side, current.food)
+            if choice is None:
                 break
-            distance = len(path) - 1
-            current_enemy_head = current.head(enemy)
-            enemy_distance = None
-            if current_enemy_head is not None:
-                enemy_distance = temporal_shortest_distance(current, current_enemy_head, food, enemy)
-            race_margin = tempo_race_margin(current, side, distance, enemy_distance)
+            food, path, distance, enemy_distance, race_margin = choice
+            if len(path) < 2:
+                break
+            digit = current.next_food_digit
             reward = digit * FOOD_SCORE * max(1, current.multipliers.get(side, 1))
             score = reward * weights['sequence_reward_point_value']
             score += max(0, 12 - distance) * weights['chain_food_value']
@@ -230,7 +251,11 @@ def score_gap_urgency(state, side):
 def food_cluster_followup_score(state, food):
     weights = get_weights()
     best = 0
-    candidates = [pos for _, pos in state.numbered_sequence()] if state.food_values else state.food
+    if state.food_values:
+        groups = state.numbered_groups(limit=3)
+        candidates = [pos for _, positions in groups[1:] for pos in positions]
+    else:
+        candidates = state.food
     for other in candidates:
         if other == food:
             continue
@@ -283,10 +308,10 @@ def advantage_control_context(state, side):
     )
 
     if state.food_values:
-        sequence = state.numbered_sequence(limit=2)
+        sequence = state.numbered_groups(limit=2)
         enemy_multiplier = max(1, state.multipliers.get(enemy, 1))
         recoverable_threat = sum(
-            digit * FOOD_SCORE * enemy_multiplier for digit, _ in sequence
+            digit * FOOD_SCORE * enemy_multiplier for digit, _positions in sequence
         )
     else:
         recoverable_threat = min(2, len(state.food)) * FOOD_SCORE
@@ -569,21 +594,18 @@ def objective_kind(state, target):
 def estimated_multiplier_points(state, side, travel_cost=0):
     if not state.food_values:
         return 0
-    enemy = state.enemy if side == state.side else ('B' if side == 'A' else 'A')
     head = state.head(side)
-    enemy_head = state.head(enemy)
     own_turns_left = max(0, (state.remaining_moves + (1 if side == state.side else 0)) // 2 - travel_cost)
     if own_turns_left <= 0 or head is None:
         return 0
     expected = 0
-    for rank, (digit, food) in enumerate(state.numbered_sequence(limit=5)):
-        our_distance = temporal_shortest_distance(state, head, food, side)
-        if our_distance is None or our_distance + rank > own_turns_left:
+    for rank, (digit, positions) in enumerate(state.numbered_groups(limit=5)):
+        choice = best_numbered_copy(state, side, positions)
+        if choice is None:
             continue
-        enemy_distance = None
-        if enemy_head is not None:
-            enemy_distance = temporal_shortest_distance(state, enemy_head, food, enemy)
-        margin = tempo_race_margin(state, side, our_distance, enemy_distance)
+        _food, _path, our_distance, enemy_distance, margin = choice
+        if our_distance + rank > own_turns_left:
+            continue
         capture_percent = 100 if margin >= 0 else 30
         expected += digit * FOOD_SCORE * capture_percent // 100
     return expected
@@ -592,13 +614,21 @@ def estimated_multiplier_points(state, side, travel_cost=0):
 def current_food_race(state, side):
     if not state.food:
         return None
-    food = next(iter(state.food))
+    choice = best_numbered_copy(state, side, state.food)
+    if choice is not None:
+        food, _path, our_distance, enemy_distance, margin = choice
+        return food, our_distance, enemy_distance, margin
     enemy = state.enemy if side == state.side else ('B' if side == 'A' else 'A')
-    our_distance = temporal_shortest_distance(state, state.head(side), food, side)
-    enemy_distance = temporal_shortest_distance(state, state.head(enemy), food, enemy)
-    if our_distance is None:
-        return food, None, enemy_distance, -99
-    return food, our_distance, enemy_distance, tempo_race_margin(state, side, our_distance, enemy_distance)
+    enemy_head = state.head(enemy)
+    enemy_options = [
+        (temporal_shortest_distance(state, enemy_head, food, enemy), food)
+        for food in state.food
+    ]
+    enemy_options = [item for item in enemy_options if item[0] is not None]
+    if not enemy_options:
+        return next(iter(state.food)), None, None, -99
+    enemy_distance, food = min(enemy_options)
+    return food, None, enemy_distance, -99
 
 
 def sequence_gate_hold_move(state, side, legal, plan, deep_moves):
@@ -623,17 +653,19 @@ def sequence_gate_hold_move(state, side, legal, plan, deep_moves):
     if enemy_current_distance is None or enemy_current_distance < weights['sequence_hold_min_enemy_distance']:
         return None
 
-    sequence = state.numbered_sequence(limit=2)
+    sequence = state.numbered_groups(limit=2)
     if len(sequence) < 2:
         return None
-    next_digit, next_food = sequence[1]
+    next_digit, next_positions = sequence[1]
     after_eat = apply_move(state, plan.first_move, side)
-    our_next_distance = temporal_shortest_distance(after_eat, after_eat.head(side), next_food, side)
-    enemy_next_distance = temporal_shortest_distance(after_eat, after_eat.head(enemy), next_food, enemy)
+    next_choice = best_numbered_copy(after_eat, side, next_positions)
+    if next_choice is None:
+        return None
+    next_food, _path, our_next_distance, enemy_next_distance, next_margin = next_choice
     if (
         our_next_distance is None
         or enemy_next_distance is None
-        or tempo_race_margin(after_eat, side, our_next_distance, enemy_next_distance) >= 0
+        or next_margin >= 0
     ):
         return None
 
@@ -821,7 +853,7 @@ def build_food_plan(state, side, food, current_target, hunger):
 
 def build_sequence_setup_plans(state, side, current_target, hunger):
     race = current_food_race(state, side)
-    sequence = state.numbered_sequence(limit=3)
+    sequence = state.numbered_groups(limit=3)
     if race is None or race[3] >= 0 or len(sequence) < 2:
         return []
 
@@ -834,7 +866,11 @@ def build_sequence_setup_plans(state, side, current_target, hunger):
     plans = []
     occupied = state.occupied()
 
-    for rank, (digit, future_food) in enumerate(sequence[1:3], start=1):
+    for rank, (digit, future_positions) in enumerate(sequence[1:3], start=1):
+        future_choice = best_numbered_copy(state, side, future_positions)
+        if future_choice is None:
+            continue
+        future_food = future_choice[0]
         candidates = []
         for staging in neighbors(future_food, state.rows, state.cols):
             if staging in occupied or staging in state.food_values or staging in state.pickups:
