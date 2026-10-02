@@ -53,6 +53,7 @@ DEFAULT_WEIGHTS = {
     'advantage_our_cell_value': 30,
     'advantage_enemy_move_reduction': 1800,
     'advantage_food_delay_value': 2200,
+    'advantage_copy_denial_value': 1600,
     'advantage_food_unreachable_bonus': 12_000,
     'advantage_enemy_food_penalty': 20_000,
     'advantage_switch_margin': 4500,

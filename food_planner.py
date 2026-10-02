@@ -4,6 +4,7 @@ from dataclasses import dataclass
 from bot_weights import get_weights
 from snake_state import (
     CRASH_PENALTY,
+    DIRS,
     FOOD_SCORE,
     RIVAL_CRASH_REWARD,
     GameState,
@@ -19,6 +20,7 @@ from snake_state import (
     shortest_path,
     shrink_wall,
     step,
+    temporal_distance_map,
     temporal_shortest_distance,
     temporal_shortest_path,
 )
@@ -119,27 +121,66 @@ def tempo_race_margin(state, side, our_distance, enemy_distance):
     return margin
 
 
+def food_distances(state, side, positions=None):
+    """Return temporal distances to every reachable copy in one objective set."""
+    head = state.head(side)
+    if head is None:
+        return {}
+    positions = state.food if positions is None else positions
+    temporal_distances = temporal_distance_map(state, head, side, goals=positions)
+    return {
+        food: temporal_distances[food]
+        for food in positions
+        if food in temporal_distances
+    }
+
+
+def food_set_race(state, side, positions=None):
+    """Compare each player's fastest route to any copy of the current digit."""
+    positions = frozenset(state.food if positions is None else positions)
+    enemy = state.enemy if side == state.side else ('B' if side == 'A' else 'A')
+    ours = food_distances(state, side, positions)
+    theirs = food_distances(state, enemy, positions)
+    our_best = min(ours.items(), key=lambda item: (item[1], item[0])) if ours else None
+    enemy_best = min(theirs.items(), key=lambda item: (item[1], item[0])) if theirs else None
+    our_distance = None if our_best is None else our_best[1]
+    enemy_distance = None if enemy_best is None else enemy_best[1]
+    margin = -99 if our_distance is None else tempo_race_margin(
+        state,
+        side,
+        our_distance,
+        enemy_distance,
+    )
+    return {
+        'our_food': None if our_best is None else our_best[0],
+        'our_distance': our_distance,
+        'enemy_food': None if enemy_best is None else enemy_best[0],
+        'enemy_distance': enemy_distance,
+        'margin': margin,
+        'our_reachable': len(ours),
+        'enemy_reachable': len(theirs),
+        'our_distances': ours,
+        'enemy_distances': theirs,
+    }
+
+
 def best_numbered_copy(state, side, positions):
     """Choose the copy we can contest best, accounting for move order."""
     head = state.head(side)
     if head is None:
         return None
-    enemy = state.enemy if side == state.side else ('B' if side == 'A' else 'A')
-    enemy_head = state.head(enemy)
+    race = food_set_race(state, side, positions)
+    enemy_distance = race['enemy_distance']
     candidates = []
-    for food in positions:
-        path = temporal_shortest_path(state, head, food, side)
-        if path is None:
-            continue
-        our_distance = len(path) - 1
-        enemy_distance = None
-        if enemy_head is not None:
-            enemy_distance = temporal_shortest_distance(state, enemy_head, food, enemy)
+    for food, our_distance in race['our_distances'].items():
         margin = tempo_race_margin(state, side, our_distance, enemy_distance)
-        candidates.append((margin, -our_distance, food, path, enemy_distance))
+        candidates.append((margin, -our_distance, food))
     if not candidates:
         return None
-    margin, neg_distance, food, path, enemy_distance = max(candidates)
+    margin, neg_distance, food = max(candidates)
+    path = temporal_shortest_path(state, head, food, side)
+    if path is None:
+        return None
     return food, path, -neg_distance, enemy_distance, margin
 
 
@@ -368,19 +409,14 @@ def advantage_control_move(state, side, legal, deep_moves, reference_move=None, 
     if enemy_head is None:
         return context
 
-    enemy_distances = {
-        food: temporal_shortest_distance(state, enemy_head, food, enemy)
-        for food in state.food
-    }
-    reachable_food = [
-        (distance, food)
-        for food, distance in enemy_distances.items()
-        if distance is not None
-    ]
+    enemy_distances = food_distances(state, enemy)
+    reachable_food = [(distance, food) for food, distance in enemy_distances.items()]
     threatened_food = min(reachable_food)[1] if reachable_food else next(iter(state.food), None)
-    before_food_distance = enemy_distances.get(threatened_food)
+    before_food_distance = min(enemy_distances.values(), default=None)
+    before_reachable_copies = len(enemy_distances)
     baseline_enemy_moves = len(legal_moves(state, enemy))
     context['baseline_enemy_moves'] = baseline_enemy_moves
+    context['enemy_reachable_copies'] = before_reachable_copies
 
     analyses = {item['direction']: item for item in deep_moves}
     candidates = []
@@ -399,24 +435,26 @@ def advantage_control_move(state, side, legal, deep_moves, reference_move=None, 
             # forced_kill_move handles score-winning traps before this phase.
             continue
 
-        secured_food = after.head(side) == threatened_food
+        secured_food = step(state.head(side), direction) in state.food
         after_food_distance = None
         delay = 0
         food_unreachable = False
-        if threatened_food is not None and not secured_food:
-            after_food_distance = temporal_shortest_distance(
-                after, after.head(enemy), threatened_food, enemy
-            )
+        after_enemy_distances = {}
+        if state.food and not secured_food:
+            after_enemy_distances = food_distances(after, enemy, after.food)
+            after_food_distance = min(after_enemy_distances.values(), default=None)
             if after_food_distance is None:
                 food_unreachable = True
             elif before_food_distance is not None:
                 delay = max(-3, min(5, after_food_distance - before_food_distance))
+        copies_denied = max(0, before_reachable_copies - len(after_enemy_distances))
 
         score = analysis['score']
         score += analysis.get('voronoi_ours', 0) * weights['advantage_our_cell_value']
         score -= analysis.get('voronoi_enemy', 0) * weights['advantage_enemy_cell_value']
         score += max(0, baseline_enemy_moves - enemy_moves_after) * weights['advantage_enemy_move_reduction']
         score += delay * weights['advantage_food_delay_value']
+        score += copies_denied * weights['advantage_copy_denial_value']
         if food_unreachable:
             score += weights['advantage_food_unreachable_bonus']
         if analysis.get('enemy_food'):
@@ -431,10 +469,14 @@ def advantage_control_move(state, side, legal, deep_moves, reference_move=None, 
                 'enemy_food_distance_after': after_food_distance,
                 'food_delay': delay,
                 'food_unreachable': food_unreachable,
+                'enemy_reachable_copies_after': len(after_enemy_distances),
+                'copies_denied': copies_denied,
                 'secured_food': secured_food,
                 'meaningful_denial': (
-                    food_unreachable
+                    secured_food
+                    or food_unreachable
                     or delay > 0
+                    or copies_denied > 0
                     or enemy_moves_after < baseline_enemy_moves
                 ),
                 'voronoi_ours': analysis.get('voronoi_ours', 0),
@@ -614,21 +656,9 @@ def estimated_multiplier_points(state, side, travel_cost=0):
 def current_food_race(state, side):
     if not state.food:
         return None
-    choice = best_numbered_copy(state, side, state.food)
-    if choice is not None:
-        food, _path, our_distance, enemy_distance, margin = choice
-        return food, our_distance, enemy_distance, margin
-    enemy = state.enemy if side == state.side else ('B' if side == 'A' else 'A')
-    enemy_head = state.head(enemy)
-    enemy_options = [
-        (temporal_shortest_distance(state, enemy_head, food, enemy), food)
-        for food in state.food
-    ]
-    enemy_options = [item for item in enemy_options if item[0] is not None]
-    if not enemy_options:
-        return next(iter(state.food)), None, None, -99
-    enemy_distance, food = min(enemy_options)
-    return food, None, enemy_distance, -99
+    race = food_set_race(state, side)
+    food = race['our_food'] or race['enemy_food'] or next(iter(state.food))
+    return food, race['our_distance'], race['enemy_distance'], race['margin']
 
 
 def sequence_gate_hold_move(state, side, legal, plan, deep_moves):
@@ -647,9 +677,8 @@ def sequence_gate_hold_move(state, side, legal, plan, deep_moves):
     lead = state.scores.get(side, 0) - state.scores.get(enemy, 0)
     if lead <= 0:
         return None
-    enemy_current_distance = temporal_shortest_distance(
-        state, state.head(enemy), plan.food, enemy
-    )
+    race = food_set_race(state, side)
+    enemy_current_distance = race['enemy_distance']
     if enemy_current_distance is None or enemy_current_distance < weights['sequence_hold_min_enemy_distance']:
         return None
 
@@ -743,7 +772,7 @@ def position_control_penalty(state, side, direction):
     return penalty
 
 
-def build_food_plan(state, side, food, current_target, hunger):
+def build_food_plan(state, side, food, current_target, hunger, food_race=None):
     head = state.head(side)
     enemy_head = state.head(state.enemy)
     if head is None:
@@ -757,7 +786,10 @@ def build_food_plan(state, side, food, current_target, hunger):
         return None
 
     enemy_distance = None
-    if enemy_head is not None:
+    if food in state.food and state.food_values:
+        food_race = food_race or food_set_race(state, side)
+        enemy_distance = food_race['enemy_distance']
+    elif enemy_head is not None:
         enemy_distance = temporal_shortest_distance(state, enemy_head, food, state.enemy)
     our_distance = len(path) - 1
     race_margin = tempo_race_margin(state, side, our_distance, enemy_distance)
@@ -936,10 +968,20 @@ def build_sequence_setup_plans(state, side, current_target, hunger):
 
 
 def choose_food_plan(state, side, current_target=None, hunger=0):
+    current_food_race = food_set_race(state, side) if state.food_values else None
     plans = [
         plan
         for food in state.objective_cells()
-        if (plan := build_food_plan(state, side, food, current_target, hunger)) is not None
+        if (
+            plan := build_food_plan(
+                state,
+                side,
+                food,
+                current_target,
+                hunger,
+                food_race=current_food_race,
+            )
+        ) is not None
     ]
     plans.extend(build_sequence_setup_plans(state, side, current_target, hunger))
     viable = [p for p in plans if p.safety in ('SAFE', 'ACCEPTABLE_RISK') or p.endgame_acceptable]
@@ -1123,21 +1165,37 @@ def fallback_denial_score(state, side, after, head):
     if enemy_head is None or current_head is None:
         return 0
 
-    weights = get_weights()
-    after_distances = distance_map(after, head, side)
-    score = 0
-    for food in state.food:
-        enemy_distance = temporal_shortest_distance(state, enemy_head, food, enemy)
-        if enemy_distance is None or enemy_distance > 5:
-            continue
-        before_distance = temporal_shortest_distance(state, current_head, food, side)
-        after_distance = after_distances.get(food)
-        if before_distance is None or after_distance is None:
-            continue
-        if wins_food_race(after, side, after_distance, enemy_distance) and after_distance < before_distance:
-            progress = before_distance - after_distance
-            score += weights['fallback_denial_reach_bonus'] + progress * weights['fallback_denial_progress']
-    return score
+    if not state.food_values:
+        weights = get_weights()
+        after_distances = distance_map(after, head, side)
+        score = 0
+        for food in state.food:
+            enemy_distance = temporal_shortest_distance(state, enemy_head, food, enemy)
+            if enemy_distance is None or enemy_distance > 5:
+                continue
+            before_distance = temporal_shortest_distance(state, current_head, food, side)
+            after_distance = after_distances.get(food)
+            if before_distance is None or after_distance is None:
+                continue
+            if wins_food_race(after, side, after_distance, enemy_distance) and after_distance < before_distance:
+                progress = before_distance - after_distance
+                score += weights['fallback_denial_reach_bonus'] + progress * weights['fallback_denial_progress']
+        return score
+
+    race = food_set_race(state, side)
+    enemy_distance = race['enemy_distance']
+    before_distance = race['our_distance']
+    if enemy_distance is None or enemy_distance > 5 or before_distance is None:
+        return 0
+    after_distances = food_distances(after, side, after.food)
+    after_distance = min(after_distances.values(), default=None)
+    if after_distance is None:
+        return 0
+    if wins_food_race(after, side, after_distance, enemy_distance) and after_distance < before_distance:
+        weights = get_weights()
+        progress = before_distance - after_distance
+        return weights['fallback_denial_reach_bonus'] + progress * weights['fallback_denial_progress']
+    return 0
 
 
 def rival_response_stats(state, side, direction, depth=1):
@@ -1272,26 +1330,79 @@ def hot_lost_food_penalty(state, side, direction):
     if after_head is None:
         return 0
 
+    if not state.food_values:
+        weights = get_weights()
+        penalty = 0
+        for food in state.food:
+            our_distance = temporal_shortest_distance(state, head, food, side)
+            enemy_distance = temporal_shortest_distance(state, enemy_head, food, enemy)
+            if (
+                our_distance is None
+                or enemy_distance is None
+                or enemy_distance >= our_distance
+                or enemy_distance > 2
+            ):
+                continue
+            after_distance = temporal_shortest_distance(after, after_head, food, side)
+            if (
+                after_distance is not None
+                and after_distance < our_distance
+                and (our_distance <= 6 or after_distance <= 3)
+            ):
+                penalty += weights['hot_lost_food_base'] + (3 - enemy_distance) * weights['hot_lost_food_enemy_bonus']
+        return penalty
+
+    race = food_set_race(state, side)
+    our_distance = race['our_distance']
+    enemy_distance = race['enemy_distance']
+    if (
+        our_distance is None
+        or enemy_distance is None
+        or enemy_distance >= our_distance
+        or enemy_distance > 2
+    ):
+        return 0
+    after_distances = food_distances(after, side, after.food)
+    after_distance = min(after_distances.values(), default=None)
+    if (
+        after_distance is None
+        or after_distance >= our_distance
+        or (our_distance > 6 and after_distance > 3)
+    ):
+        return 0
     weights = get_weights()
-    penalty = 0
-    for food in state.food:
-        our_distance = temporal_shortest_distance(state, head, food, side)
-        enemy_distance = temporal_shortest_distance(state, enemy_head, food, enemy)
-        if (
-            our_distance is None
-            or enemy_distance is None
-            or enemy_distance >= our_distance
-            or enemy_distance > 2
-        ):
+    return weights['hot_lost_food_base'] + (3 - enemy_distance) * weights['hot_lost_food_enemy_bonus']
+
+
+def winning_suicide_move(state, side):
+    """Return a guaranteed crash that ends the match with us still ahead."""
+    enemy = state.enemy if side == state.side else ('B' if side == 'A' else 'A')
+    projected_our_score = state.scores.get(side, 0) + CRASH_PENALTY
+    projected_enemy_score = state.scores.get(enemy, 0) + RIVAL_CRASH_REWARD
+    if projected_our_score <= projected_enemy_score:
+        return None
+
+    snake = state.body(side)
+    head = state.head(side)
+    if not snake or head is None:
+        return None
+    occupied_snakes = set()
+    for body in state.snakes.values():
+        occupied_snakes.update(body)
+    own_tail = snake[-1]
+    for direction in DIRS:
+        target = step(head, direction)
+        if not (0 <= target[0] < state.rows and 0 <= target[1] < state.cols):
+            return direction
+        if target in state.walls:
             continue
-        after_distance = temporal_shortest_distance(after, after_head, food, side)
-        if (
-            after_distance is not None
-            and after_distance < our_distance
-            and (our_distance <= 6 or after_distance <= 3)
-        ):
-            penalty += weights['hot_lost_food_base'] + (3 - enemy_distance) * weights['hot_lost_food_enemy_bonus']
-    return penalty
+        if target in occupied_snakes:
+            if len(snake) > 1 and target == snake[1]:
+                return direction
+            if target == own_tail and side in state.reliable_tails:
+                continue
+            return direction
+    return None
 
 
 def forced_kill_move(state, side, legal):

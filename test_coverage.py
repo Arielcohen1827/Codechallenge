@@ -287,3 +287,5 @@ class TestProtocolEdgeCases(unittest.IsolatedAsyncioTestCase):
     def test_write_log_handles_os_error(self):
         with patch('pathlib.Path.open', side_effect=OSError('blocked')):
             run.write_game_log('cannot-write')
+        with patch('pathlib.Path.mkdir', side_effect=OSError('blocked')):
+            run.write_live_snapshot('cannot-write', {})

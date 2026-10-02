@@ -135,6 +135,9 @@ class IterativeSearchEngine:
         if (self.nodes & 31) == 0:
             self.check_deadline()
 
+        suicide_value = self.winning_suicide_value(state)
+        if suicide_value is not None:
+            return suicide_value
         if state.remaining_moves <= 0:
             return self.final_score_value(state)
         moves = self.legal_moves(state)
@@ -212,6 +215,36 @@ class IterativeSearchEngine:
             if not target_bit & blocked:
                 moves.append(direction)
         return tuple(moves)
+
+    def winning_suicide_value(self, state):
+        side = state.side
+        enemy = 1 - side
+        if state.scores[side] + CRASH_PENALTY <= state.scores[enemy] + RIVAL_CRASH_REWARD:
+            return None
+        body = state.bodies[side]
+        if not body:
+            return None
+        occupied = set(state.bodies[0]) | set(state.bodies[1])
+        walls = set(state.walls)
+        for direction in DIRS:
+            target = self.target_index(body[0], direction)
+            if target is None:
+                break
+            if target in walls:
+                continue
+            if target in occupied:
+                if len(body) > 1 and target == body[1]:
+                    break
+                if target == body[-1] and state.reliable_tails[side]:
+                    continue
+                break
+        else:
+            return None
+        scores = list(state.scores)
+        scores[side] += CRASH_PENALTY
+        scores[enemy] += RIVAL_CRASH_REWARD
+        difference = scores[self.root_side] - scores[1 - self.root_side]
+        return 500_000_000 + difference if difference > 0 else -500_000_000 + difference
 
     def apply_move(self, state, direction):
         side = state.side

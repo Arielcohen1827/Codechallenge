@@ -535,6 +535,36 @@ def temporal_shortest_distance(state, start, goal, side, max_time=None):
     return None if path is None else len(path) - 1
 
 
+def temporal_distance_map(state, start, side, max_time=None, goals=()):
+    """Compute temporal distances once when several goals share a board."""
+    if start is None:
+        return {}
+    snake = state.body(side)
+    blocked_release = release_times(state)
+    goals = frozenset(goals)
+    for cell in state.wrong_food():
+        if cell not in goals:
+            blocked_release[cell] = NEVER_RELEASE
+    blocked_release[start] = 0
+    max_time = max_time or state.rows * state.cols
+    q = deque([start])
+    distances = {start: 0}
+    while q:
+        current = q.popleft()
+        time = distances[current]
+        if time >= max_time:
+            continue
+        for nb in neighbors(current, state.rows, state.cols):
+            next_time = time + 1
+            if time == 0 and len(snake) > 1 and nb == snake[1]:
+                continue
+            if blocked_release.get(nb, 0) > next_time or nb in distances:
+                continue
+            distances[nb] = next_time
+            q.append(nb)
+    return distances
+
+
 def shortest_path(state, start, goal, side):
     blocked = blocked_for_path(state, side)
     q = deque([start])

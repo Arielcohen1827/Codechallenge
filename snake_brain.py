@@ -19,6 +19,7 @@ from food_planner import (
     should_commit_to_food,
     should_use_plan_for_positioning,
     sequence_gate_hold_move,
+    winning_suicide_move,
 )
 from move_search import TurnSearchCache, rank_deep_moves
 from snake_state import (
@@ -55,6 +56,15 @@ class SnakeBrain:
 
         legal = legal_moves(state, side)
         debug = self._base_debug(data, state, legal)
+        suicide = winning_suicide_move(state, side)
+        if suicide:
+            debug['terminal_scores'] = {
+                side: state.scores.get(side, 0) - 500,
+                state.enemy: state.scores.get(state.enemy, 0) + 1000,
+            }
+            self._save_debug(game_id, debug, 'winning_suicide', suicide)
+            self._remember(game_id, state)
+            return suicide
         if not legal:
             self._save_debug(game_id, debug, 'no_legal_moves', 'up')
             return 'up'
@@ -300,6 +310,8 @@ class SnakeBrain:
             state = parse_state(data, self.previous_snakes.get(game_id))
             self.current_states[game_id] = state
         legal = legal_moves(state, state.side)
+        if direction == winning_suicide_move(state, state.side):
+            return direction
         if direction in legal:
             return direction
         if legal:
@@ -480,6 +492,8 @@ class SnakeBrain:
 def final_safe_direction(data, direction):
     state = parse_state(data)
     legal = legal_moves(state, state.side)
+    if direction == winning_suicide_move(state, state.side):
+        return direction
     if direction in legal:
         return direction
     if legal:
