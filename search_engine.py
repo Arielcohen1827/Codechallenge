@@ -347,7 +347,7 @@ class IterativeSearchEngine:
             if target in food:
                 reward = 100_000 + food_values.get(target, 1) * 10_000
             elif target in pickups:
-                reward = 35_000
+                reward = 15_000 + self.future_food_base_points(state, state.side) * 8
             row, col = self.cell(target)
             center = -int((abs(row - center_row) + abs(col - center_col)) * 100)
             target_progress = 0
@@ -388,20 +388,56 @@ class IterativeSearchEngine:
         difference = state.scores[root] - state.scores[enemy]
         root_region = self.region_size(state, root)
         enemy_region = self.region_size(state, enemy)
-        root_moves = len(self.legal_moves_for(state, root))
-        enemy_moves = len(self.legal_moves_for(state, enemy))
+        root_moves = len(self.productive_moves_for(state, root))
+        enemy_moves = len(self.productive_moves_for(state, enemy))
         center_delta = self.center_value(state.bodies[root][0]) - self.center_value(state.bodies[enemy][0])
         value = difference * 22
         value += (root_region - enemy_region) * 70
         value += (root_moves - enemy_moves) * 1800
         value += center_delta * 120
-        value += (state.multipliers[root] - state.multipliers[enemy]) * 1800
+        future_base = max(
+            self.future_food_base_points(state, root),
+            self.future_food_base_points(state, enemy),
+        )
+        multiplier_value = max(1800, min(40_000, future_base * 8))
+        value += (state.multipliers[root] - state.multipliers[enemy]) * multiplier_value
+        if root_moves == 0:
+            value -= 45_000
+        if enemy_moves == 0:
+            value += 45_000
         if self.target is not None:
             root_distance = self.manhattan(state.bodies[root][0], self.target)
             enemy_distance = self.manhattan(state.bodies[enemy][0], self.target)
             value += (enemy_distance - root_distance) * 250
         self.evaluations[state] = value
         return value
+
+    def future_food_base_points(self, state, side):
+        if not state.food_values or not state.next_food_digit:
+            return FOOD_SCORE
+        present = {digit for _cell, digit in state.food_values}
+        ordered = []
+        for offset in range(9):
+            digit = cyclic_digit(state.next_food_digit, offset)
+            if digit in present:
+                ordered.append(digit)
+        turns_left = max(0, (state.remaining_moves + (1 if side == state.side else 0)) // 2)
+        captures = min(len(ordered), max(1, turns_left // 8))
+        return sum(digit * FOOD_SCORE for digit in ordered[:captures])
+
+    def productive_moves_for(self, state, side):
+        moves = self.legal_moves_for(state, side)
+        body = state.bodies[side]
+        if not body:
+            return ()
+        food = set(state.food)
+        wrong = {cell for cell, _digit in state.food_values if cell not in food}
+        walls = set(state.walls)
+        return tuple(
+            direction for direction in moves
+            if self.target_index(body[0], direction) not in walls
+            and self.target_index(body[0], direction) not in wrong
+        )
 
     def legal_moves_for(self, state, side):
         if side == state.side:
@@ -435,7 +471,8 @@ class IterativeSearchEngine:
         if not body:
             return 0
         start = 1 << body[0]
-        blocked = self.occupied_mask(state) & ~start
+        wrong_food = tuple(cell for cell, _digit in state.food_values if cell not in state.food)
+        blocked = (self.occupied_mask(state) | self.mask(wrong_food)) & ~start
         seen = start
         frontier = start
         while frontier:

@@ -3,8 +3,7 @@ from collections import Counter, deque
 from bot_weights import get_weights
 from food_planner import (
     advantage_control_move,
-    build_food_plan,
-    build_sequence_setup_plans,
+    build_food_plans,
     classify_safety,
     choose_food_plan,
     center_control_score,
@@ -25,12 +24,9 @@ from move_search import TurnSearchCache, rank_deep_moves
 from snake_state import (
     FOOD_SCORE,
     apply_move,
-    count_exits,
-    flood_region,
     legal_moves,
     manhattan,
     parse_state,
-    shortest_distance,
     step,
 )
 
@@ -101,13 +97,27 @@ class SnakeBrain:
         hunger = self.turns_since_food[(game_id, side)]
         repeat_count = self._repeat_count(game_id, state)
         search_cache = TurnSearchCache()
-        plan = choose_food_plan(state, side, current_target, hunger)
-        deep_moves = rank_deep_moves(state, side, legal, plan, hunger, repeat_count, search_cache)
+        active_games = len(self.previous_snakes) + (game_id not in self.previous_snakes)
+        search_time_ms = self._search_time_budget(active_games)
+        food_plans = build_food_plans(state, side, current_target, hunger)
+        plan = choose_food_plan(state, side, current_target, hunger, plans=food_plans)
+        deep_moves = rank_deep_moves(
+            state,
+            side,
+            legal,
+            plan,
+            hunger,
+            repeat_count,
+            search_cache,
+            search_time_ms=search_time_ms,
+        )
         debug.update(
             {
                 'current_target': current_target,
                 'hunger': hunger,
                 'repeat_count': repeat_count,
+                'active_games': active_games,
+                'search_time_budget_ms': search_time_ms,
                 'plan': self._plan_debug(plan),
                 'commit_to_plan': should_commit_to_food(plan, hunger, repeat_count) if plan else False,
                 'deep_moves': deep_moves[:4],
@@ -116,8 +126,8 @@ class SnakeBrain:
         if self.enable_debug:
             debug.update(
                 {
-                    'food_options': self._food_options(state, side, current_target, hunger),
-                    'candidate_moves': self._candidate_moves(state, side, legal),
+                    'food_options': self._food_options(food_plans),
+                    'candidate_moves': self._candidate_moves(state, side, legal, deep_moves),
                 }
             )
 
@@ -303,6 +313,17 @@ class SnakeBrain:
         self._remember(game_id, state)
         return move
 
+    @staticmethod
+    def _search_time_budget(active_games):
+        full_budget = get_weights()['iterative_search_time_ms']
+        if active_games >= 16:
+            return min(full_budget, 10)
+        if active_games >= 8:
+            return min(full_budget, 18)
+        if active_games >= 4:
+            return min(full_budget, 30)
+        return full_budget
+
     def safe_direction(self, data, direction):
         game_id = str(data.get('game_id', 'default'))
         state = self.current_states.get(game_id)
@@ -442,48 +463,51 @@ class SnakeBrain:
             'objective_kind': plan.objective_kind,
             'objective_reward': plan.objective_reward,
             'sequence_rank': plan.sequence_rank,
+            'projected_income': plan.projected_income,
+            'rival_projected_income': plan.rival_projected_income,
+            'economic_swing': plan.economic_swing,
+            'multiplier_marginal': plan.multiplier_marginal,
             'value': plan.value,
         }
 
-    def _food_options(self, state, side, current_target, hunger):
-        options = []
-        for food in sorted(state.objective_cells()):
-            plan = build_food_plan(state, side, food, current_target, hunger)
-            if plan is not None:
-                options.append(self._plan_debug(plan))
-        for plan in build_sequence_setup_plans(state, side, current_target, hunger):
-            options.append(self._plan_debug(plan))
+    def _food_options(self, plans):
+        options = [self._plan_debug(plan) for plan in plans]
         options.sort(key=lambda item: item['value'], reverse=True)
         return options
 
-    def _candidate_moves(self, state, side, legal):
+    def _candidate_moves(self, state, side, legal, deep_moves):
+        deep_by_direction = {item['direction']: item for item in deep_moves}
         candidates = []
         for direction in legal:
             after = apply_move(state, direction, side)
             head = after.head(side)
-            safety, space, exits_after, tail_ok = classify_safety(after, side)
-            nearest_food = None
-            if head is not None:
-                distances = [shortest_distance(after, head, food, side) for food in after.objective_cells()]
-                distances = [distance for distance in distances if distance is not None]
-                nearest_food = min(distances) if distances else None
+            analysis = deep_by_direction.get(direction, {})
+            nearest_food = (
+                min((manhattan(head, food) for food in after.objective_cells()), default=None)
+                if head is not None
+                else None
+            )
             candidates.append(
                 {
                     'direction': direction,
-                    'safety': safety,
-                    'space': space,
-                    'exits': exits_after,
-                    'tail_reachable': tail_ok,
-                    'region': 0 if head is None else len(flood_region(after, head, after.occupied())),
-                    'count_exits': count_exits(after, side),
+                    'safety': analysis.get('safety'),
+                    'space': analysis.get('region', 0),
+                    'exits': analysis.get('exits', 0),
+                    'tail_reachable': analysis.get('tail_reachable', False),
+                    'region': analysis.get('region', 0),
+                    'count_exits': analysis.get('exits', 0),
                     'nearest_food_distance': nearest_food,
                     'center_control_score': center_control_score(after, head),
                     'position_control_penalty': position_control_penalty(state, side, direction),
-                    'rival_penalty': rival_response_penalty(state, side, direction),
-                    'hot_lost_food_penalty': hot_lost_food_penalty(state, side, direction),
+                    'rival_penalty': None,
+                    'hot_lost_food_penalty': None,
                     'wrong_food_penalty': step(state.head(side), direction) in state.wrong_food(),
                     'wall_hit': step(state.head(side), direction) in state.walls,
-                    'rival_stats': rival_response_stats(state, side, direction),
+                    'rival_stats': {
+                        'enemy_reply': analysis.get('enemy_reply'),
+                        'our_replies': analysis.get('our_replies'),
+                        'forced_loss': analysis.get('forced_loss', False),
+                    },
                 }
             )
         return candidates

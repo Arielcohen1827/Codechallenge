@@ -103,6 +103,13 @@ celerybeat.pid
 
 # Environments
 .env
+.env_*
+!.env_example
+.env.*
+!.env.example
+!.env.*.example
+!.env.sample
+!.env.*.sample
 .venv
 env/
 venv/
@@ -130,6 +137,7 @@ dmypy.json
 
 # Local run helper (may embed a bot token)
 start_dev.sh
+*.local.bat
 
 # game logs written at the end of each match
 game_*.log

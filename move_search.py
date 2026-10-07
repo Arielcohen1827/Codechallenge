@@ -18,6 +18,7 @@ from snake_state import (
     manhattan,
     neighbors,
     step,
+    strategic_blocked,
 )
 from search_engine import IterativeSearchEngine
 
@@ -49,6 +50,7 @@ class TurnSearchCache:
         self.distances = {}
         self.voronoi = {}
         self.position = {}
+        self.quick_position = {}
         self.move_quality_scores = {}
 
     def apply(self, state, side, direction):
@@ -67,7 +69,7 @@ class TurnSearchCache:
         head = state.head(side)
         key = (state_key(state), side, head)
         if key not in self.region:
-            self.region[key] = len(flood_region(state, head, state.occupied()))
+            self.region[key] = len(flood_region(state, head, strategic_blocked(state)))
         return self.region[key]
 
     def exits_count(self, state, side):
@@ -231,7 +233,38 @@ def position_score(state, side, cache):
     return score
 
 
-def static_after_move_score(state, side, direction, plan, hunger, repeat_count, cache):
+def quick_position_score(state, side, cache):
+    """Survival-focused evaluation for turns with many concurrent games."""
+    key = (state_key(state), side)
+    if key in cache.quick_position:
+        return cache.quick_position[key]
+    head = state.head(side)
+    if head is None:
+        cache.quick_position[key] = -1_000_000
+        return cache.quick_position[key]
+
+    weights = get_weights()
+    safety, region, exits, tail_ok = cache.safety_class(state, side)
+    replies = len(cache.legal_moves(state, side))
+    score = min(region, 130) * weights['deep_region_value']
+    score += min(exits, 4) * weights['deep_exit_value']
+    score += min(replies, 4) * weights['deep_reply_value']
+    score += center_control_score(state, head)
+    if tail_ok:
+        score += weights['deep_tail_bonus']
+    if safety == 'DANGEROUS':
+        score -= weights['deep_danger_penalty']
+    elif safety == 'ACCEPTABLE_RISK':
+        score -= weights['deep_risk_penalty']
+    if not replies:
+        score -= weights['deep_no_reply_penalty']
+    elif replies == 1:
+        score -= weights['deep_one_reply_penalty']
+    cache.quick_position[key] = score
+    return score
+
+
+def static_after_move_score(state, side, direction, plan, hunger, repeat_count, cache, quick=False):
     if direction not in cache.legal_moves(state, side):
         return -1_000_000
     after = cache.apply(state, side, direction)
@@ -247,7 +280,8 @@ def static_after_move_score(state, side, direction, plan, hunger, repeat_count, 
         if direction == plan.first_move:
             score += weights['current_target_bonus']
     score -= hot_lost_food_penalty(state, side, direction) * weights['deep_hot_lost_multiplier']
-    score += position_score(after, side, cache)
+    evaluator = quick_position_score if quick else position_score
+    score += evaluator(after, side, cache)
     target = None if state.head(side) is None else step(state.head(side), direction)
     if target in state.food:
         score += weights['deep_food_now_bonus']
@@ -340,6 +374,68 @@ def two_ply_score(state, side, direction, plan, hunger, repeat_count, cache):
     return immediate + (worst or 0), worst_info
 
 
+def fast_two_ply_score(state, side, direction, plan, hunger, repeat_count, cache):
+    """Keep rival-reply and trap detection while avoiding repeated Voronoi maps."""
+    weights = get_weights()
+    after = cache.apply(state, side, direction)
+    enemy = opponent_of(state, side)
+    enemy_moves = cache.legal_moves(after, enemy)
+    immediate = static_after_move_score(
+        state,
+        side,
+        direction,
+        plan,
+        hunger,
+        repeat_count,
+        cache,
+        quick=True,
+    )
+    if not enemy_moves:
+        terminal_value, terminal_outcome = terminal_trap_value(after, side, enemy)
+        return immediate + terminal_value, {
+            'enemy_reply': None,
+            'reply_score': terminal_value,
+            'our_replies': 99,
+            'enemy_food': False,
+            'forced_loss': terminal_outcome == 'loss',
+            'terminal_outcome': terminal_outcome,
+        }
+
+    enemy_head = after.head(enemy)
+    worst_key = None
+    worst_score = 0
+    worst_info = None
+    for enemy_move in enemy_moves:
+        enemy_target = None if enemy_head is None else step(enemy_head, enemy_move)
+        enemy_food = enemy_target in after.objective_cells() if enemy_target is not None else False
+        enemy_wall_hit = enemy_target in after.walls if enemy_target is not None else False
+        after_enemy = cache.apply(after, enemy, enemy_move)
+        our_replies = cache.legal_moves(after_enemy, side)
+        forced_loss = not our_replies
+        reply_score = quick_position_score(after_enemy, side, cache)
+        if enemy_food:
+            reply_score -= weights['deep_enemy_food_penalty']
+            if enemy_target in after.food:
+                reply_score -= after.food_reward(enemy, enemy_target) * weights['deep_score_point_value']
+            elif enemy_target in after.pickups:
+                reply_score -= weights['deep_enemy_pickup_penalty']
+        if enemy_wall_hit:
+            reply_score += weights['deep_enemy_wall_hit_bonus']
+        reply_key = (0 if forced_loss else 1, reply_score)
+        if worst_key is None or reply_key < worst_key:
+            worst_key = reply_key
+            worst_score = reply_score
+            worst_info = {
+                'enemy_reply': enemy_move,
+                'reply_score': reply_score,
+                'our_replies': len(our_replies),
+                'enemy_food': enemy_food,
+                'enemy_wall_hit': enemy_wall_hit,
+                'forced_loss': forced_loss,
+            }
+    return immediate + worst_score, worst_info
+
+
 def extra_depth_score(state, side, direction, cache):
     weights = get_weights()
     after = cache.apply(state, side, direction)
@@ -371,14 +467,29 @@ def extra_depth_score(state, side, direction, cache):
     return worst or 0
 
 
-def rank_deep_moves(state, side, legal, plan=None, hunger=0, repeat_count=0, cache=None):
+def rank_deep_moves(
+    state,
+    side,
+    legal,
+    plan=None,
+    hunger=0,
+    repeat_count=0,
+    cache=None,
+    search_time_ms=None,
+):
     cache = cache or TurnSearchCache()
+    fast_mode = search_time_ms is not None and search_time_ms <= 18
     analyses = []
     for direction in legal:
-        score, info = two_ply_score(state, side, direction, plan, hunger, repeat_count, cache)
+        scorer = fast_two_ply_score if fast_mode else two_ply_score
+        score, info = scorer(state, side, direction, plan, hunger, repeat_count, cache)
         after = cache.apply(state, side, direction)
-        voronoi = voronoi_control(after, side, cache)
-        safety, region, exits, _ = cache.safety_class(after, side)
+        voronoi = (
+            {'score': 0, 'ours': 0, 'enemy': 0}
+            if fast_mode
+            else voronoi_control(after, side, cache)
+        )
+        safety, region, exits, tail_ok = cache.safety_class(after, side)
         analyses.append(
             {
                 'direction': direction,
@@ -387,6 +498,7 @@ def rank_deep_moves(state, side, legal, plan=None, hunger=0, repeat_count=0, cac
                 'extra_score': None,
                 'region': region,
                 'exits': exits,
+                'tail_reachable': tail_ok,
                 'safety': safety,
                 'replies': len(cache.legal_moves(after, side)),
                 'food_now': after.head(side) in state.objective_cells(),
@@ -407,7 +519,7 @@ def rank_deep_moves(state, side, legal, plan=None, hunger=0, repeat_count=0, cac
         or analyses[0]['exits'] <= 1
         or analyses[0].get('enemy_food')
     )
-    if close_race or risky_best:
+    if not fast_mode and (close_race or risky_best):
         for item in analyses[:2]:
             extra = extra_depth_score(state, side, item['direction'], cache)
             item['extra_score'] = extra
@@ -416,7 +528,11 @@ def rank_deep_moves(state, side, legal, plan=None, hunger=0, repeat_count=0, cac
 
     engine, compact = IterativeSearchEngine.from_game_state(
         state,
-        time_budget_ms=weights['iterative_search_time_ms'],
+        time_budget_ms=(
+            weights['iterative_search_time_ms']
+            if search_time_ms is None
+            else max(5, int(search_time_ms))
+        ),
         max_depth=weights['iterative_search_max_depth'],
     )
     search = engine.search(

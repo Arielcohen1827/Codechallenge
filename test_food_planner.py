@@ -21,13 +21,14 @@ from food_planner import (
     current_food_race,
     rank_survival_moves,
     sequence_gate_hold_move,
+    projected_sequence_income,
     survival_move_analysis,
     survival_position_score,
     territory_control_score,
     winning_suicide_move,
 )
 from snake_brain import SnakeBrain, final_safe_direction
-from snake_state import GameState, apply_move, legal_moves, parse_state
+from snake_state import GameState, apply_move, count_exits, legal_moves, parse_state
 from test_run import turn
 
 
@@ -199,6 +200,51 @@ class TestTerminalCloseout(unittest.TestCase):
 
 
 class TestSequenceAndRiskBranches(unittest.TestCase):
+    def test_projected_income_prices_multiplier_and_remaining_time(self):
+        state = state_from(
+            '|A 1 2 3 4 5 B|',
+            remaining=120,
+            multiplier_1=1,
+            multiplier_2=1,
+        )
+        boosted = replace(state, multipliers={'A': 2, 'B': 1})
+        late = replace(state, remaining_moves=4)
+
+        base_income = projected_sequence_income(state, 'A')
+        boosted_income = projected_sequence_income(boosted, 'A')
+
+        self.assertGreater(base_income, 0)
+        self.assertGreater(boosted_income, base_income)
+        self.assertLess(projected_sequence_income(late, 'A'), base_income)
+        self.assertGreater(estimated_multiplier_points(state, 'A'), 0)
+
+    def test_wrong_digits_do_not_count_as_safe_exits(self):
+        state = state_from(
+            '|234|\n'
+            '|1A5|\n'
+            '| B |'
+        )
+
+        self.assertEqual(state.next_food_digit, 1)
+        self.assertEqual(count_exits(state, 'A'), 1)
+        self.assertGreater(len(legal_moves(state, 'A')), count_exits(state, 'A'))
+
+    def test_multiplier_plan_exposes_future_economic_value(self):
+        state = state_from(
+            '|A X 1|\n'
+            '|2 3 4|\n'
+            '|5   B|',
+            remaining=180,
+        )
+        pickup = next(iter(state.pickups))
+
+        plan = build_food_plan(state, 'A', pickup, None, 0)
+
+        self.assertIsNotNone(plan)
+        self.assertEqual(plan.objective_kind, 'multiplier')
+        self.assertGreater(plan.multiplier_marginal, 0)
+        self.assertNotEqual(plan.economic_swing, 0)
+
     def test_sequence_hold_uses_global_next_race(self):
         state = state_from(
             '|     B|\n'

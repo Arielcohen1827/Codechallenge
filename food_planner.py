@@ -20,6 +20,7 @@ from snake_state import (
     shortest_path,
     shrink_wall,
     step,
+    strategic_blocked,
     temporal_distance_map,
     temporal_shortest_distance,
     temporal_shortest_path,
@@ -48,6 +49,10 @@ class FoodPlan:
     objective_kind: str = 'food'
     objective_reward: int = 100
     sequence_rank: int = 0
+    projected_income: int = 0
+    rival_projected_income: int = 0
+    economic_swing: int = 0
+    multiplier_marginal: int = 0
 
     @property
     def first_move(self):
@@ -311,10 +316,12 @@ def rival_food_threat_score(state, side, food, our_distance, enemy_distance):
         return 0
 
     weights = get_weights()
+    enemy = state.enemy if side == state.side else ('B' if side == 'A' else 'A')
     threat = 0
     if enemy_distance <= our_distance + 2:
         threat += max(0, 8 - enemy_distance) * weights['rival_food_threat_value']
         threat += food_cluster_followup_score(state, food)
+        threat += state.food_reward(enemy, food) * weights['rival_reward_point_value']
     if tempo_race_margin(state, side, our_distance, enemy_distance) < 0:
         threat += (our_distance - enemy_distance) * weights['rival_food_threat_value']
     return threat
@@ -349,11 +356,9 @@ def advantage_control_context(state, side):
     )
 
     if state.food_values:
-        sequence = state.numbered_groups(limit=2)
-        enemy_multiplier = max(1, state.multipliers.get(enemy, 1))
-        recoverable_threat = sum(
-            digit * FOOD_SCORE * enemy_multiplier for digit, _positions in sequence
-        )
+        recoverable_threat = projected_sequence_income(state, enemy, limit=5)
+        if state.pickups:
+            recoverable_threat += estimated_multiplier_points(state, enemy) * min(2, len(state.pickups))
     else:
         recoverable_threat = min(2, len(state.food)) * FOOD_SCORE
     recoverable_threat += min(2, len(state.pickups)) * 50
@@ -521,7 +526,7 @@ def classify_safety(after, side):
     head = after.head(side)
     if head is None:
         return 'SUICIDAL', 0, 0, False
-    region = flood_region(after, head, after.occupied())
+    region = flood_region(after, head, strategic_blocked(after))
     body_len = len(after.body(side))
     exits = count_exits(after, side)
     tail_ok = can_reach_tail(after, side)
@@ -633,24 +638,65 @@ def objective_kind(state, target):
     return 'multiplier' if target in state.pickups else 'food'
 
 
-def estimated_multiplier_points(state, side, travel_cost=0):
+def projected_sequence_income(state, side, travel_cost=0, multiplier=None, limit=5):
+    """Estimate score from the visible numbered sequence without path searches.
+
+    This is intentionally cheaper than the tactical planner. It follows the
+    nearest copy of each visible digit, discounts contested races, and stops
+    when the player's remaining turns cannot cover the route.
+    """
     if not state.food_values:
         return 0
     head = state.head(side)
+    enemy = state.enemy if side == state.side else ('B' if side == 'A' else 'A')
+    enemy_head = state.head(enemy)
     own_turns_left = max(0, (state.remaining_moves + (1 if side == state.side else 0)) // 2 - travel_cost)
     if own_turns_left <= 0 or head is None:
         return 0
-    expected = 0
-    for rank, (digit, positions) in enumerate(state.numbered_groups(limit=5)):
-        choice = best_numbered_copy(state, side, positions)
-        if choice is None:
-            continue
-        _food, _path, our_distance, enemy_distance, margin = choice
-        if our_distance + rank > own_turns_left:
-            continue
-        capture_percent = 100 if margin >= 0 else 30
-        expected += digit * FOOD_SCORE * capture_percent // 100
-    return expected
+
+    multiplier = max(1, state.multipliers.get(side, 1) if multiplier is None else multiplier)
+    cursor = head
+    enemy_cursor = enemy_head
+    elapsed = 0
+    projected = 0
+    for digit, positions in state.numbered_groups(limit=limit):
+        target = min(positions, key=lambda cell: (manhattan(cursor, cell), cell))
+        our_distance = manhattan(cursor, target)
+        arrival = elapsed + max(1, our_distance)
+        if arrival > own_turns_left:
+            break
+
+        enemy_distance = None
+        enemy_target = None
+        if enemy_cursor is not None:
+            enemy_target = min(positions, key=lambda cell: (manhattan(enemy_cursor, cell), cell))
+            enemy_distance = manhattan(enemy_cursor, enemy_target)
+        margin = tempo_race_margin(state, side, our_distance, enemy_distance)
+        if margin >= 2:
+            capture_percent = 100
+        elif margin >= 0:
+            capture_percent = 82
+        elif margin == -1:
+            capture_percent = 35
+        else:
+            capture_percent = 10
+
+        time_percent = max(35, 100 - max(0, arrival - 4) * 3)
+        reward = digit * FOOD_SCORE * multiplier
+        projected += reward * capture_percent * time_percent // 10_000
+        elapsed = arrival
+        cursor = target
+        if enemy_target is not None:
+            enemy_cursor = enemy_target
+    return projected
+
+
+def estimated_multiplier_points(state, side, travel_cost=0):
+    """Return the marginal future score of adding one multiplier level."""
+    current = max(1, state.multipliers.get(side, 1))
+    baseline = projected_sequence_income(state, side, travel_cost, current)
+    boosted = projected_sequence_income(state, side, travel_cost, current + 1)
+    return max(0, boosted - baseline)
 
 
 def current_food_race(state, side):
@@ -806,20 +852,35 @@ def build_food_plan(state, side, food, current_target, hunger, food_race=None):
     endgame_acceptable = endgame_accepts_food_risk(state, our_distance, race_margin, safety)
     kind = objective_kind(state, food)
     reward = objective_reward(state, side, food)
+    enemy = state.enemy if side == state.side else ('B' if side == 'A' else 'A')
+    projected_income = projected_sequence_income(after, side)
+    rival_projected_income = projected_sequence_income(after, enemy)
+    economic_swing = projected_income - rival_projected_income
+    multiplier_marginal = 0
 
     weights = get_weights()
     value = weights['food_base_value']
     value += max(0, reward - FOOD_SCORE) * weights['objective_point_value']
+    economic_value = economic_swing * weights['economic_projection_value']
+    economic_cap = weights['economic_projection_cap']
+    value += max(-economic_cap, min(economic_cap, economic_value))
     if kind == 'multiplier':
-        value += estimated_multiplier_points(state, side, our_distance) * weights['multiplier_future_point_value']
+        baseline_income = projected_sequence_income(state, side, our_distance)
+        multiplier_marginal = max(0, projected_income - baseline_income)
+        if multiplier_marginal == 0:
+            multiplier_marginal = estimated_multiplier_points(state, side, our_distance)
+        value += multiplier_marginal * weights['multiplier_future_point_value']
         value += weights['multiplier_base_value']
-        enemy = state.enemy if side == state.side else ('B' if side == 'A' else 'A')
         multiplier_gap = state.multipliers.get(enemy, 1) - state.multipliers.get(side, 1)
         value += multiplier_gap * weights['multiplier_gap_value']
+        if enemy_distance is not None and race_margin >= 0:
+            enemy_marginal = estimated_multiplier_points(state, enemy, enemy_distance)
+            value += enemy_marginal * weights['multiplier_denial_point_value']
         current_race = current_food_race(state, side)
         if current_race is not None and current_race[3] >= 0:
             value -= hunger * weights['multiplier_hunger_penalty']
-        value -= max(0, state.multipliers.get(side, 1) - 2) * weights['multiplier_stack_penalty']
+        if multiplier_marginal < FOOD_SCORE * 5:
+            value -= max(0, state.multipliers.get(side, 1) - 2) * weights['multiplier_stack_penalty']
     elif state.food_values:
         value += min(hunger, 30) * weights['numbered_food_hunger_value']
     value -= our_distance * weights['food_distance_cost']
@@ -880,6 +941,10 @@ def build_food_plan(state, side, food, current_target, hunger, food_race=None):
         endgame_acceptable=endgame_acceptable,
         objective_kind=kind,
         objective_reward=reward,
+        projected_income=projected_income,
+        rival_projected_income=rival_projected_income,
+        economic_swing=economic_swing,
+        multiplier_marginal=multiplier_marginal,
     )
 
 
@@ -929,6 +994,9 @@ def build_sequence_setup_plans(state, side, current_target, hunger):
         readiness = enemy_current_distance - our_distance
         race_margin = enemy_followup - 1 + readiness
         future_reward = digit * FOOD_SCORE * max(1, state.multipliers.get(side, 1))
+        projected_income = projected_sequence_income(after, side)
+        rival_projected_income = projected_sequence_income(after, enemy)
+        economic_swing = projected_income - rival_projected_income
         value = weights['sequence_setup_base_value']
         value += future_reward * weights['sequence_setup_reward_point_value']
         value += readiness * weights['sequence_setup_readiness_value']
@@ -939,6 +1007,9 @@ def build_sequence_setup_plans(state, side, current_target, hunger):
         value += exits_after * weights['exits_after_value']
         value += weights['tail_reachable_bonus'] if tail_ok else 0
         value += center_control_score(after, after.head(side))
+        economic_value = economic_swing * weights['economic_projection_value']
+        economic_cap = weights['economic_projection_cap']
+        value += max(-economic_cap, min(economic_cap, economic_value))
         if staging == current_target:
             value += weights['current_target_bonus']
         value += min(hunger, 30) * weights['sequence_setup_hunger_value']
@@ -962,12 +1033,15 @@ def build_sequence_setup_plans(state, side, current_target, hunger):
                 objective_kind='sequence_setup',
                 objective_reward=future_reward,
                 sequence_rank=rank,
+                projected_income=projected_income,
+                rival_projected_income=rival_projected_income,
+                economic_swing=economic_swing,
             )
         )
     return plans
 
 
-def choose_food_plan(state, side, current_target=None, hunger=0):
+def build_food_plans(state, side, current_target=None, hunger=0):
     current_food_race = food_set_race(state, side) if state.food_values else None
     plans = [
         plan
@@ -984,6 +1058,11 @@ def choose_food_plan(state, side, current_target=None, hunger=0):
         ) is not None
     ]
     plans.extend(build_sequence_setup_plans(state, side, current_target, hunger))
+    return plans
+
+
+def choose_food_plan(state, side, current_target=None, hunger=0, plans=None):
+    plans = build_food_plans(state, side, current_target, hunger) if plans is None else list(plans)
     viable = [p for p in plans if p.safety in ('SAFE', 'ACCEPTABLE_RISK') or p.endgame_acceptable]
     if not viable:
         viable = [p for p in plans if p.safety == 'DANGEROUS' and hunger >= 35 and p.race_margin >= 0]
@@ -1002,7 +1081,22 @@ def choose_food_plan(state, side, current_target=None, hunger=0):
             and p.safety in ('SAFE', 'ACCEPTABLE_RISK')
         ]
         if harvest:
-            return max(harvest, key=hunger_food_key)
+            best_harvest = max(harvest, key=hunger_food_key)
+            investments = [
+                p for p in viable
+                if p.objective_kind == 'multiplier'
+                and p.safety == 'SAFE'
+                and p.race_margin >= 0
+                and p.our_distance <= best_harvest.our_distance + 3
+            ]
+            best_investment = max(investments, key=food_tiebreak_key) if investments else None
+            strong_investment = (
+                best_investment is not None
+                and best_investment.multiplier_marginal >= max(500, best_harvest.objective_reward * 2)
+                and best_investment.value >= best_harvest.value - get_weights()['food_plan_switch_margin']
+            )
+            if not strong_investment:
+                return best_harvest
 
     strategic = [p for p in viable if not is_structural_food_risk(p)]
     if strategic:
@@ -1275,7 +1369,7 @@ def rival_space_penalty(state, side, direction):
         return 1_000_000
 
     body_len = len(after.body(side))
-    immediate_region = len(flood_region(after, head, after.occupied()))
+    immediate_region = len(flood_region(after, head, strategic_blocked(after)))
     immediate_exits = count_exits(after, side)
     weights = get_weights()
     base = 0
@@ -1298,8 +1392,9 @@ def rival_space_penalty(state, side, direction):
             continue
 
         replies = legal_moves(after_enemy, side)
-        own_region = len(flood_region(after_enemy, our_head, after_enemy.occupied()))
-        enemy_region = 0 if enemy_head is None else len(flood_region(after_enemy, enemy_head, after_enemy.occupied()))
+        blocked = strategic_blocked(after_enemy)
+        own_region = len(flood_region(after_enemy, our_head, blocked))
+        enemy_region = 0 if enemy_head is None else len(flood_region(after_enemy, enemy_head, blocked))
         threat = 0
         if not replies:
             threat += weights['enemy_no_reply_threat']
@@ -1413,7 +1508,7 @@ def forced_kill_move(state, side, legal):
         own_head = after.head(side)
         if own_head is None:
             continue
-        own_region = flood_region(after, own_head, after.occupied())
+        own_region = flood_region(after, own_head, strategic_blocked(after))
         projected_our_score = after.scores.get(side, 0) + RIVAL_CRASH_REWARD
         projected_enemy_score = after.scores.get(enemy, 0) + CRASH_PENALTY
         wins_on_score = projected_our_score > projected_enemy_score
@@ -1428,7 +1523,7 @@ def survival_position_score(state, side):
         return -1_000_000
 
     weights = get_weights()
-    region = flood_region(state, head, state.occupied())
+    region = flood_region(state, head, strategic_blocked(state))
     exits = count_exits(state, side)
     replies = legal_moves(state, side)
     body_len = len(state.body(side))
@@ -1478,7 +1573,7 @@ def survival_move_analysis(state, side, direction, plan=None, hunger=0, repeat_c
 
     after = apply_move(state, direction, side)
     head = after.head(side)
-    region = flood_region(after, head, after.occupied()) if head is not None else set()
+    region = flood_region(after, head, strategic_blocked(after)) if head is not None else set()
     exits = count_exits(after, side) if head is not None else 0
     enemy = state.enemy if side == state.side else ('B' if side == 'A' else 'A')
     enemy_head = after.head(enemy)
@@ -1598,7 +1693,7 @@ def move_quality_score(state, side, direction, plan=None, hunger=0, repeat_count
     if plan and plan.race_margin >= 0:
         before = manhattan(state.head(side), plan.food)
         progress = before - manhattan(head, plan.food)
-    region = flood_region(after, head, after.occupied())
+    region = flood_region(after, head, strategic_blocked(after))
     exits = count_exits(after, side)
     food_distance_score = 0 if nearest is None else -nearest * weights['fallback_food_distance_cost']
     cycle_penalty = repeat_count * weights['fallback_cycle_penalty'] if progress <= 0 and tempo_hunger >= 10 else 0

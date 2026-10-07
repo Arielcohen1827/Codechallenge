@@ -8,6 +8,13 @@ from urllib.parse import unquote, urlparse
 ROOT = Path(__file__).resolve().parent
 VIEWER_DIR = ROOT / 'viewer'
 LIVE_DIR = ROOT / 'games' / 'live'
+INITIAL_SNAKE_LENGTH = 3
+ALLOWED_BROWSER_ORIGINS = frozenset({
+    'https://codechallenge.net.ar',
+    'http://codechallenge.net.ar',
+    'http://127.0.0.1:8765',
+    'http://localhost:8765',
+})
 
 
 def read_snapshot(path):
@@ -17,11 +24,20 @@ def read_snapshot(path):
         return None
 
 
+def food_eaten(snapshot, side):
+    stored = snapshot.get('food_eaten') or {}
+    if side in stored:
+        return stored[side]
+    board = str((snapshot.get('turn_data') or {}).get('board', ''))
+    return max(0, sum(char in (side, side.lower()) for char in board) - INITIAL_SNAKE_LENGTH)
+
+
 def game_summary(snapshot):
     data = snapshot.get('turn_data') or {}
     return {
         'game_id': snapshot.get('game_id', ''),
         'status': snapshot.get('status', 'playing'),
+        'started_at': snapshot.get('started_at', snapshot.get('updated_at', 0)),
         'updated_at': snapshot.get('updated_at', 0),
         'turn_number': snapshot.get('turn_number', 0),
         'bot_version': snapshot.get('bot_version', ''),
@@ -31,6 +47,8 @@ def game_summary(snapshot):
         'score_2': data.get('score_2', 0),
         'remaining_moves': data.get('remaining_moves', 0),
         'side': data.get('side', ''),
+        'food_eaten_1': food_eaten(snapshot, 'A'),
+        'food_eaten_2': food_eaten(snapshot, 'B'),
     }
 
 
@@ -40,7 +58,18 @@ class ViewerHandler(SimpleHTTPRequestHandler):
 
     def end_headers(self):
         self.send_header('Cache-Control', 'no-store')
+        origin = self.headers.get('Origin', '')
+        if origin in ALLOWED_BROWSER_ORIGINS:
+            self.send_header('Access-Control-Allow-Origin', origin)
+            self.send_header('Access-Control-Allow-Methods', 'GET, OPTIONS')
+            self.send_header('Access-Control-Allow-Headers', 'Content-Type')
+            self.send_header('Access-Control-Allow-Private-Network', 'true')
+            self.send_header('Vary', 'Origin')
         super().end_headers()
+
+    def do_OPTIONS(self):
+        self.send_response(204)
+        self.end_headers()
 
     def send_json(self, payload, status=200):
         body = json.dumps(payload).encode('utf-8')
@@ -58,7 +87,12 @@ class ViewerHandler(SimpleHTTPRequestHandler):
                 snapshot = read_snapshot(path)
                 if snapshot:
                     snapshots.append(game_summary(snapshot))
-            snapshots.sort(key=lambda game: game['updated_at'], reverse=True)
+            snapshots.sort(
+                key=lambda game: (
+                    game['status'] == 'finished',
+                    game['started_at'] if game['status'] == 'playing' else game['updated_at'],
+                )
+            )
             self.send_json({'games': snapshots[:100]})
             return
         if parsed.path.startswith('/api/game/'):

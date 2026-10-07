@@ -71,16 +71,174 @@ class InTempDirTestCase(HistoryTestCase):
         with open(os.path.join(self.tmpdir.name, 'games', f"game_{game_id}.log")) as f:
             return f.read()
 
-
 class TestProtocol(InTempDirTestCase, unittest.IsolatedAsyncioTestCase):
-    async def test_challenge_is_accepted(self):
+    async def test_configured_websocket_challenge(self):
+        websocket = FakeWebSocket()
+        previous_target = run.OUTGOING_CHALLENGE_TARGET
+        previous_game = run.OUTGOING_CHALLENGE_GAME
+        run.OUTGOING_CHALLENGE_TARGET = 'Charmander'
+        run.OUTGOING_CHALLENGE_GAME = 'snake'
+        try:
+            sent = await run.send_configured_challenge(websocket)
+        finally:
+            run.OUTGOING_CHALLENGE_TARGET = previous_target
+            run.OUTGOING_CHALLENGE_GAME = previous_game
+
+        self.assertTrue(sent)
+        self.assertEqual(websocket.sent, [{
+            'action': 'challenge',
+            'data': {'opponent': 'Charmander', 'game': 'snake'},
+        }])
+
+    async def test_configured_websocket_challenge_is_disabled_by_default(self):
+        websocket = FakeWebSocket()
+        previous_target = run.OUTGOING_CHALLENGE_TARGET
+        run.OUTGOING_CHALLENGE_TARGET = ''
+        try:
+            sent = await run.send_configured_challenge(websocket)
+        finally:
+            run.OUTGOING_CHALLENGE_TARGET = previous_target
+
+        self.assertFalse(sent)
+        self.assertEqual(websocket.sent, [])
+
+    async def test_untrusted_incoming_challenge_is_ignored_by_default(self):
         websocket = FakeWebSocket([
-            {'event': 'challenge', 'data': {'challenge_id': 'c_1'}},
+            {
+                'event': 'challenge',
+                'data': {'challenge_id': 'c_1', 'opponent': 'otro-bot'},
+            },
         ])
 
         await run.play(websocket)
 
-        self.assertEqual(websocket.sent, [{'action': 'accept_challenge', 'data': {'challenge_id': 'c_1'}}])
+        self.assertEqual(websocket.sent, [])
+
+    async def test_incoming_challenge_can_be_enabled(self):
+        websocket = FakeWebSocket()
+        request = {
+            'event': 'challenge',
+            'data': {'challenge_id': 'c_1', 'opponent': 'ArielCohen'},
+        }
+
+        previous = run.ACCEPT_INCOMING_CHALLENGES
+        run.ACCEPT_INCOMING_CHALLENGES = True
+        try:
+            await run.on_challenge(websocket, request)
+        finally:
+            run.ACCEPT_INCOMING_CHALLENGES = previous
+
+        self.assertEqual(websocket.sent, [
+            {'action': 'accept_challenge', 'data': {'challenge_id': 'c_1'}},
+        ])
+
+    async def test_tournament_challenge_accepts_any_opponent(self):
+        websocket = FakeWebSocket()
+        request = {
+            'event': 'challenge',
+            'data': {
+                'challenge_id': 't_1',
+                'opponent': 'rival-torneo',
+                'tournament_id': 'torneo-42',
+            },
+        }
+
+        previous = run.ACCEPT_INCOMING_CHALLENGES
+        run.ACCEPT_INCOMING_CHALLENGES = True
+        try:
+            await run.on_challenge(websocket, request)
+        finally:
+            run.ACCEPT_INCOMING_CHALLENGES = previous
+
+        self.assertEqual(websocket.sent, [
+            {'action': 'accept_challenge', 'data': {'challenge_id': 't_1'}},
+        ])
+
+    def test_tournament_challenge_marker_variants(self):
+        self.assertTrue(run.is_tournament_challenge({'source': 'championship-final'}))
+        self.assertTrue(run.is_tournament_challenge({'mode': 'torneo'}))
+        self.assertFalse(run.is_tournament_challenge({'source': 'direct'}))
+
+    async def test_duplicate_accept_probe_is_limited_to_expected_opponent(self):
+        websocket = FakeWebSocket()
+        expected = {
+            'event': 'challenge',
+            'data': {'challenge_id': 'c_2', 'opponent': 'arielcohen'},
+        }
+        unexpected = {
+            'event': 'challenge',
+            'data': {'challenge_id': 'c_3', 'opponent': 'otro-bot'},
+        }
+        previous = (
+            run.ACCEPT_INCOMING_CHALLENGES,
+            run.INCOMING_CHALLENGE_EXPECTED_OPPONENT,
+            run.DUPLICATE_ACCEPT_COUNT,
+        )
+        run.ACCEPT_INCOMING_CHALLENGES = True
+        run.INCOMING_CHALLENGE_EXPECTED_OPPONENT = 'arielcohen'
+        run.DUPLICATE_ACCEPT_COUNT = 2
+        try:
+            await run.on_challenge(websocket, unexpected)
+            await run.on_challenge(websocket, expected)
+        finally:
+            (
+                run.ACCEPT_INCOMING_CHALLENGES,
+                run.INCOMING_CHALLENGE_EXPECTED_OPPONENT,
+                run.DUPLICATE_ACCEPT_COUNT,
+            ) = previous
+
+        self.assertEqual(websocket.sent, [
+            {'action': 'accept_challenge', 'data': {'challenge_id': 'c_2'}},
+            {'action': 'accept_challenge', 'data': {'challenge_id': 'c_2'}},
+        ])
+
+    async def test_duplicate_accept_once_then_returns_to_normal_policy(self):
+        websocket = FakeWebSocket()
+        ariel_1 = {
+            'event': 'challenge',
+            'data': {'challenge_id': 'c_4', 'opponent': 'arielcohen'},
+        }
+        ariel_2 = {
+            'event': 'challenge',
+            'data': {'challenge_id': 'c_5', 'opponent': 'arielcohen'},
+        }
+        tournament = {
+            'event': 'challenge',
+            'data': {
+                'challenge_id': 't_2',
+                'opponent': 'rival-torneo',
+                'tournament_id': 'torneo-43',
+            },
+        }
+        previous = (
+            run.ACCEPT_INCOMING_CHALLENGES,
+            run.DUPLICATE_ACCEPT_COUNT,
+            run.DUPLICATE_ACCEPT_OPPONENT,
+            run.DUPLICATE_ACCEPT_ONCE,
+            run.DUPLICATE_ACCEPT_USED,
+        )
+        run.ACCEPT_INCOMING_CHALLENGES = True
+        run.DUPLICATE_ACCEPT_COUNT = 2
+        run.DUPLICATE_ACCEPT_OPPONENT = 'arielcohen'
+        run.DUPLICATE_ACCEPT_ONCE = True
+        run.DUPLICATE_ACCEPT_USED = False
+        try:
+            await run.on_challenge(websocket, ariel_1)
+            await run.on_challenge(websocket, ariel_2)
+            await run.on_challenge(websocket, tournament)
+        finally:
+            (
+                run.ACCEPT_INCOMING_CHALLENGES,
+                run.DUPLICATE_ACCEPT_COUNT,
+                run.DUPLICATE_ACCEPT_OPPONENT,
+                run.DUPLICATE_ACCEPT_ONCE,
+                run.DUPLICATE_ACCEPT_USED,
+            ) = previous
+
+        self.assertEqual(
+            [message['data']['challenge_id'] for message in websocket.sent],
+            ['c_4', 'c_4', 'c_5', 't_2'],
+        )
 
     async def test_your_turn_sends_direction_move(self):
         websocket = FakeWebSocket()
@@ -105,7 +263,7 @@ class TestProtocol(InTempDirTestCase, unittest.IsolatedAsyncioTestCase):
 
         await run.play(websocket)
 
-        self.assertEqual([item['action'] for item in websocket.sent], ['accept_challenge', 'move'])
+        self.assertEqual([item['action'] for item in websocket.sent], ['move'])
         self.assertEqual([line[0] for line in self.read_log('g_1').splitlines()], ['=', '<', '?', '>', '<'])
 
     async def test_game_log_includes_bot_version_metadata(self):
@@ -148,6 +306,14 @@ class TestProtocol(InTempDirTestCase, unittest.IsolatedAsyncioTestCase):
 class TestFoodFirstBrain(HistoryTestCase):
     def choose(self, board, side='A', score_1=0, score_2=0, remaining=250, game_id='g_1'):
         return run.BOT.choose_move(turn(board, side, score_1, score_2, remaining, game_id))
+
+    def test_search_budget_scales_with_concurrent_games(self):
+        full = run.BOT._search_time_budget(1)
+
+        self.assertEqual(run.BOT._search_time_budget(3), full)
+        self.assertLess(run.BOT._search_time_budget(4), full)
+        self.assertLess(run.BOT._search_time_budget(8), run.BOT._search_time_budget(4))
+        self.assertLess(run.BOT._search_time_budget(16), run.BOT._search_time_budget(8))
 
     def test_adjacent_open_food_is_eaten(self):
         self.assertEqual(self.choose('|A*   |\n|     |\n|    B|'), 'right')
@@ -855,6 +1021,16 @@ class TestFoodFirstBrain(HistoryTestCase):
 
         self.assertTrue(by_direction['left']['forced_loss'])
         self.assertEqual(analyses[0]['direction'], 'up')
+
+        fast_analyses = rank_deep_moves(
+            state,
+            'B',
+            legal_moves(state, 'B'),
+            search_time_ms=10,
+        )
+        fast_by_direction = {item['direction']: item for item in fast_analyses}
+        self.assertTrue(fast_by_direction['left']['forced_loss'])
+        self.assertEqual(fast_analyses[0]['direction'], 'up')
 
     def test_ambiguous_body_shape_does_not_treat_body_as_free_tail(self):
         board = (

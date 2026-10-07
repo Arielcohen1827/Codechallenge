@@ -336,6 +336,11 @@ def in_bounds(state, pos):
     return 0 <= pos[0] < state.rows and 0 <= pos[1] < state.cols
 
 
+def strategic_blocked(state):
+    """Cells that are unusable without crashing or paying a score penalty."""
+    return state.occupied() | set(state.wrong_food())
+
+
 def legal_moves(state, side=None):
     side = side or state.side
     snake = state.body(side)
@@ -610,7 +615,10 @@ def count_exits(state, side):
     head = state.head(side)
     if head is None:
         return 0
-    blocked = state.occupied()
+    # Wrong digits are technically legal, but they cost 500 points and do not
+    # represent a useful escape. Counting them as open cells made the planner
+    # enter corridors whose only eventual exit was a forced penalty.
+    blocked = strategic_blocked(state)
     snake = state.body(side)
     if snake and side in state.reliable_tails:
         blocked.discard(snake[-1])

@@ -52,8 +52,35 @@ Get `<YOUR_BOT_TOKEN>` from **My Bots** in the web app. By default `run.py`
 connects to the production server; switch the `uri` in `run.py` to the
 `localhost` line to play against a local server.
 
-> `start.sh` / `start_dev.sh` are convenience runners kept out of git because
-> they may embed your personal token.
+### Windows bot selector
+
+Run `install.bat` once to prepare `venv`, then open `boot.bat` or `boot1.bat`.
+Both runners ask which bot to use and open the local match viewer.
+
+The launcher reads `.env` beside the runners. This file is ignored by Git.
+`.env_example` is a versioned template without tokens. Configure each bot with
+a numbered pair of keys:
+
+```dotenv
+CODECHALLENGE_BOT_1_NAME=arielcohen
+CODECHALLENGE_BOT_1_TOKEN=
+CODECHALLENGE_BOT_2_NAME=Charmander
+CODECHALLENGE_BOT_2_TOKEN=
+```
+
+Fill each token value locally from **My Bots**. To add another bot, use the
+next number. Only bots with a configured token are available for selection.
+Use plain `KEY=value` lines, optionally quote the value, and put comments on
+their own lines starting with `#`. Shell commands and variable interpolation
+are not evaluated.
+
+The selected token is also passed as `CODECHALLENGE_TOKEN` to the bot process.
+When no named bots are configured, an existing `CODECHALLENGE_TOKEN`
+environment variable can be used as a fallback.
+
+`start.sh` remains a command-line runner accepting the token as an argument.
+`start_dev.sh` and `*.local.bat` are ignored local helpers. Never put real
+tokens in `.env_example` or other tracked files.
 
 ## Tests
 

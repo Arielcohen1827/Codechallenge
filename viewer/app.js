@@ -24,6 +24,26 @@ function displayName(value, fallback) {
   return text.includes('@') ? text.split('@')[0] : text;
 }
 
+function foodLabel(count) {
+  const value = Number(count || 0);
+  return `${value} comida${value === 1 ? '' : 's'}`;
+}
+
+function boardFoodCount(data, side) {
+  const board = String(data.board || '');
+  const length = [...board].filter((char) => char === side || char === side.toLowerCase()).length;
+  return Math.max(0, length - 3);
+}
+
+function escapeHtml(value) {
+  return String(value)
+    .replaceAll('&', '&amp;')
+    .replaceAll('<', '&lt;')
+    .replaceAll('>', '&gt;')
+    .replaceAll('"', '&quot;')
+    .replaceAll("'", '&#039;');
+}
+
 function setConnection(online) {
   const connection = document.querySelector('.connection');
   connection.classList.toggle('online', online);
@@ -40,12 +60,18 @@ function renderGameList() {
     const button = document.createElement('button');
     button.type = 'button';
     button.className = `game-item ${game.status === 'finished' ? 'finished' : ''} ${game.game_id === state.selectedId ? 'selected' : ''}`;
+    const player1 = escapeHtml(displayName(game.player_1, 'A'));
+    const player2 = escapeHtml(displayName(game.player_2, 'B'));
+    const timestamp = game.status === 'playing' ? game.started_at : game.updated_at;
     button.innerHTML = `
       <div class="game-item-top">
-        <strong><span class="live-pip"></span>${displayName(game.player_1, 'A')} vs ${displayName(game.player_2, 'B')}</strong>
-        <span>${relativeTime(game.updated_at)}</span>
+        <strong><span class="live-pip"></span>${player1} vs ${player2}</strong>
+        <span>${relativeTime(timestamp)}</span>
       </div>
-      <div class="game-item-score"><span>${game.status === 'playing' ? 'En juego' : 'Finalizada'}</span><b>${game.score_1} - ${game.score_2}</b></div>`;
+      <div class="game-item-score">
+        <span>${game.status === 'playing' ? 'En juego' : 'Finalizada'} · Comidas ${game.food_eaten_1 || 0}-${game.food_eaten_2 || 0}</span>
+        <b>${game.score_1} - ${game.score_2}</b>
+      </div>`;
     button.addEventListener('click', () => {
       state.selectedId = game.game_id;
       renderGameList();
@@ -115,6 +141,9 @@ function renderSnapshot(snapshot) {
   el('score-b').textContent = data.score_2 ?? 0;
   el('multiplier-a').textContent = `x${data.multiplier_1 ?? 1}`;
   el('multiplier-b').textContent = `x${data.multiplier_2 ?? 1}`;
+  const foodEaten = snapshot.food_eaten || {};
+  el('food-a').textContent = foodLabel(foodEaten.A ?? boardFoodCount(data, 'A'));
+  el('food-b').textContent = foodLabel(foodEaten.B ?? boardFoodCount(data, 'B'));
   const status = el('match-status');
   status.textContent = snapshot.status === 'finished' ? 'FINALIZADA' : 'EN JUEGO';
   status.classList.toggle('finished', snapshot.status === 'finished');
