@@ -419,7 +419,13 @@ def apply_move(state, direction, side=None):
         next_food_digit = find_next_food_digit(food_values.values())
     food = frozenset(
         pos for pos, digit in food_values.items() if digit == next_food_digit
-    ) if food_values else frozenset(state.food - {target})
+    ) if food_values else frozenset(
+        pos for pos in state.food
+        if pos != target and not (
+            eats and not hits_wall and eaten_digit is not None
+            and state.food_values.get(pos) == eaten_digit
+        )
+    )
     walls = shrink_wall(state.walls) if side == 'B' else state.walls
     return GameState(
         rows=state.rows,

@@ -295,7 +295,13 @@ class IterativeSearchEngine:
         if food_values:
             food = tuple(sorted(cell for cell, digit in food_values.items() if digit == next_digit))
         else:
-            food = tuple(cell for cell in state.food if cell != target)
+            food = tuple(
+                cell for cell in state.food
+                if cell != target and not (
+                    eats and not hits_wall and eaten_digit is not None
+                    and (cell, eaten_digit) in state.food_values
+                )
+            )
 
         if side == 1:
             walls = self.shrink_wall(walls)
