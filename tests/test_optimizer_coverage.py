@@ -5,227 +5,410 @@ import random
 import tempfile
 import unittest
 from pathlib import Path
-from types import SimpleNamespace
-from unittest.mock import Mock, patch
+from unittest.mock import patch
 
 from snake_bot import bot_weights
-from tests.test_bot_lab_coverage import simulation_result
-from tools import bot_lab, optimize_weights as optimizer
+from tools import optimize_weights as optimizer
 
 
-def summary(**changes):
-    values = bot_lab.summarize_simulations([simulation_result(
-        no_legal_side=None, wall_hits_a=0, wall_hits_b=0)])
-    values.update(changes)
-    return values
-
-
-def options(**changes):
-    values = dict(games=2, mirror_seeds=True, seed=7, turns=4, rows=5, cols=6,
-                  food=2, max_log_positions=3, min_objective_improvement=50,
-                  min_diff=80, require_winning_record=True, max_candidate_deaths=0,
-                  max_candidate_wall_hits=0, max_edge100=50, min_food100=13,
-                  max_log_unsafe=0, trials=3, json=True, until_improvement=False)
-    values.update(changes)
-    return SimpleNamespace(**values)
+def competitive(seeds=20, repetitions=1):
+    total = seeds * repetitions * 2
+    return {
+        'total': total, 'wins': total, 'losses': 0, 'draws': 0,
+        'win_rate': 1, 'win_rate_without_draws': 1,
+        'mean_score_diff': 10, 'median_score_diff': 10,
+        'by_candidate_side': {side: {'total': total // 2, 'wins': total // 2,
+                                    'losses': 0, 'draws': 0,
+                                    'mean_score_diff': 10} for side in ('A', 'B')},
+        'pairs': {'records': [
+            {'seed': seed, 'repetition': rep, 'candidate_sides': ['A', 'B'],
+             'wins': 2, 'losses': 0, 'draws': 0, 'score_diff_sum': 20}
+            for seed in range(seeds) for rep in range(1, repetitions + 1)]},
+        'events': {'candidate': {'wall_hits': 100}},
+    }
 
 
 class OptimizerTests(unittest.TestCase):
-    def setUp(self):
-        previous = dict(bot_weights.ACTIVE_WEIGHTS)
-        self.addCleanup(self.restore_weights, previous)
+    def test_ranking_ignores_diagnostics_and_prioritizes_competition(self):
+        winner = competitive()
+        loser = dict(competitive(), wins=0, losses=40, mean_score_diff=1000000,
+                     survival=1000000, logs={'food': 999})
+        self.assertGreater(optimizer.competitive_rank(winner), optimizer.competitive_rank(loser))
+        copied = dict(winner, events={}, survival=-999999, logs={})
+        self.assertEqual(optimizer.competitive_rank(winner), optimizer.competitive_rank(copied))
 
-    @staticmethod
-    def restore_weights(previous):
-        bot_weights.ACTIVE_WEIGHTS.clear()
-        bot_weights.ACTIVE_WEIGHTS.update(previous)
+    def test_candidate_is_local_seeded_and_never_mutates_base(self):
+        base = {'center_unit_value': 80, 'iterative_search_time_ms': 45}
+        bounds = {'center_unit_value': (72, 88)}
+        first = optimizer.random_candidate(base, random.Random(7), bounds)
+        self.assertEqual(first, optimizer.random_candidate(base, random.Random(7), bounds))
+        self.assertTrue(72 <= first['center_unit_value'] <= 88)
+        self.assertEqual(first['iterative_search_time_ms'], 45)
+        self.assertEqual(base['center_unit_value'], 80)
 
-    def test_random_candidate_only_changes_requested_ranges_and_preserves_input(self):
-        base = {'x': 10, 'y': 99}
-        for seed in (1, 2):
-            candidate = optimizer.random_candidate(base, random.Random(seed), {'x': (20, 30)})
-            self.assertTrue(20 <= candidate['x'] <= 30)
-            self.assertEqual(candidate['y'], 99)
-        self.assertEqual(base, {'x': 10, 'y': 99})
+    def test_evidence_uses_unique_seeds_not_repetitions(self):
+        evidence = optimizer.improvement_evidence(competitive(seeds=2, repetitions=10), 2)
+        self.assertFalse(evidence['valid_improvement'])
+        self.assertEqual(evidence['seed_groups'], 2)
+        self.assertEqual(evidence['informative_seed_groups'], 2)
 
-    def test_mutation_can_skip_and_clamps_to_both_bounds(self):
-        for chance, factor, expected in [(0.9, 1, 50), (0.1, 3, 60), (0.1, 0.1, 40)]:
-            rng = Mock()
-            rng.random.return_value = chance
-            rng.uniform.return_value = factor
-            base = {'x': 50, 'y': 7}
-            candidate = optimizer.mutate_candidate(base, rng, 0.3, {'x': (40, 60)})
-            self.assertEqual(candidate, {'x': expected, 'y': 7})
-            self.assertEqual(base['x'], 50)
-            if chance > 0.65:
-                rng.uniform.assert_not_called()
+    def test_evidence_reports_side_bias_without_requiring_both_sides_to_win(self):
+        data = competitive()
+        data['by_candidate_side']['B'].update(wins=0, draws=20)
+        data.update(wins=20, draws=20)
+        for pair in data['pairs']['records']:
+            pair.update(wins=1, draws=1)
+        self.assertTrue(optimizer.improvement_evidence(data, 3)['valid_improvement'])
+        data['by_candidate_side']['B']['total'] = 19
+        self.assertFalse(optimizer.improvement_evidence(data, 3)['valid_improvement'])
 
-    def test_simulation_score_accounts_for_wins_losses_deaths_and_wall_hits(self):
-        data = summary(candidate_games=2, candidate_wins=1, candidate_losses=1,
-                       candidate_deaths=1, opponent_deaths=1,
-                       candidate_wall_hits=1, opponent_wall_hits=1)
-        expected = (300 * 3 + 200 * 5.5 + 700 - 450 + 10 * 12 + 30 * 80
-                    + 100 * 0.12 - 20 * 45 - 2500 + 700 - 900 + 250)
-        self.assertEqual(optimizer.simulation_score(data), expected)
-        self.assertEqual(optimizer.simulation_score(summary(candidate_games=0,
-                                                            candidate_wins=0, candidate_losses=0)),
-                         optimizer.simulation_score(summary()) - 1400)
+    def test_plan_counts_every_mirrored_game_at_400_turns(self):
+        plan = optimizer.build_plan(trials=6, top_b=3, top_c=2, a_seeds=2,
+                                    b_seeds=4, final_seeds=20, repetitions=2,
+                                    seed=7, seconds_per_game=1, budget_minutes=5)
+        self.assertEqual(plan['estimated_games'], 208)
+        self.assertEqual(plan['estimated_seconds'], 208)
+        self.assertEqual(plan['turns'], 400)
+        stages = plan['stages']
+        self.assertLess(stages[0]['seed'] + stages[0]['seeds'] - 1, stages[1]['seed'])
+        self.assertLess(stages[1]['seed'] + stages[1]['seeds'] - 1, stages[2]['seed'])
 
-    def test_log_score_rewards_food_and_penalizes_edges_and_unsafe_positions(self):
-        self.assertEqual(optimizer.log_score({}), 0)
-        self.assertEqual(optimizer.log_score({'positions': 10, 'food_taken_now': 2,
-                                              'edge_or_corner_move': 1,
-                                              'safety_DANGEROUS': 1, 'safety_SUICIDAL': 2}),
-                         20 * 90 - 10 * 18 - 3 * 1200)
+    def test_plan_rejects_insufficient_budget_and_explains_estimate(self):
+        with self.assertRaises(ValueError):
+            optimizer.build_plan(seconds_per_game=60, budget_minutes=1)
+        plan = optimizer.build_plan(seconds_per_game=1, budget_minutes=2)
+        self.assertLessEqual(plan['estimated_seconds'], 96)
+        self.assertIn('approximate', plan['budget_note'])
 
-    def test_evaluation_pairs_identical_seeds_and_weights_on_both_sides(self):
-        candidate, baseline = {'center_unit_value': 10}, {'center_unit_value': 20}
-        for mirrored, expected in [(True, [(7, 'A'), (7, 'B'), (8, 'A'), (8, 'B')]),
-                                    (False, [(7, 'A'), (8, 'B')])]:
-            args = options(mirror_seeds=mirrored)
-            with patch.object(optimizer, 'simulate_game', return_value=simulation_result()) as simulate:
-                score, sim, logs = optimizer.evaluate_candidate(candidate, baseline, args, [])
-            self.assertEqual([(c.args[0], c.kwargs['candidate_side']) for c in simulate.call_args_list], expected)
-            for call in simulate.call_args_list:
-                side = call.kwargs['candidate_side']
-                self.assertEqual(call.kwargs['weights_by_side'][side], candidate)
-                self.assertEqual(call.kwargs['weights_by_side']['B' if side == 'A' else 'A'], baseline)
-                self.assertEqual(call.args[1:], (4, 5, 6, 2))
-            self.assertEqual(score, optimizer.simulation_score(sim))
-            self.assertIsNone(logs)
-
-    def test_evaluation_includes_log_score_and_forwards_sampling_limit(self):
-        logs = {'positions': 1, 'food_taken_now': 1}
-        for limit, expected_limit in [(3, 3), (0, None)]:
-            with patch.object(optimizer, 'simulate_game', return_value=simulation_result()), \
-                    patch.object(optimizer, 'evaluate_log_decisions', return_value=logs) as evaluate:
-                score, sim, returned_logs = optimizer.evaluate_candidate(
-                    {'center_unit_value': 10}, {}, options(max_log_positions=limit), ['fixture.log'])
-            evaluate.assert_called_once_with(['fixture.log'], expected_limit)
-            self.assertEqual(returned_logs, logs)
-            self.assertEqual(score, optimizer.simulation_score(sim) + optimizer.log_score(logs))
-
-    def test_acceptance_rejects_each_independent_regression(self):
-        args = options()
-        record = {'score': 150, 'simulation': summary(), 'logs': None}
-        self.assertTrue(optimizer.is_valid_improvement(record, args, 100))
-        for field, value in [('avg_candidate_score_diff', 79), ('candidate_wins', 0),
-                             ('candidate_deaths', 1), ('candidate_wall_hits', 1),
-                             ('edge_moves_per_100_turns', 51), ('food_per_100_turns', 12)]:
-            changed = dict(record, simulation=summary(**{field: value}))
-            with self.subTest(field=field):
-                self.assertFalse(optimizer.is_valid_improvement(changed, args, 100))
-        self.assertFalse(optimizer.is_valid_improvement(dict(record, score=149), args, 100))
-        for key in ('safety_DANGEROUS', 'safety_SUICIDAL'):
-            self.assertFalse(optimizer.is_valid_improvement(dict(record, logs={key: 1}), args, 100))
-        self.assertTrue(optimizer.is_valid_improvement(
-            dict(record, simulation=summary(candidate_wins=0)), options(require_winning_record=False), 100))
-
-    def test_candidate_generation_baseline_mutation_and_random_selection(self):
-        base = {'x': 5}
-        rng = Mock()
-        first = optimizer.make_candidate(1, None, base, {'x': (1, 10)}, rng)
-        self.assertEqual(first, base)
-        self.assertIsNot(first, base)
-        rng.random.return_value = 0.1
-        rng.uniform.return_value = 1.2
-        self.assertEqual(optimizer.make_candidate(2, {'weights': {'x': 8}}, base,
-                                                 {'x': (1, 10)}, rng), {'x': 9})
-        rng.random.return_value = 0.9
-        rng.randint.return_value = 3
-        self.assertEqual(optimizer.make_candidate(3, {'weights': {'x': 8}}, base,
-                                                 {'x': (1, 10)}, rng), {'x': 3})
-
-    def test_batch_keeps_best_but_accepts_first_valid_improvement(self):
-        trials = [(100, summary(), None), (170, summary(), None), (200, summary(), None)]
-        with patch.object(optimizer, 'evaluate_candidate', side_effect=trials), \
-                patch.object(optimizer, 'make_candidate', side_effect=[{'x': 1}, {'x': 2}, {'x': 3}]):
-            best, batch_best, accepted, baseline = optimizer.run_batch(
-                options(), [], {}, {}, random.Random(1), batch_index=2)
-        self.assertEqual(best, batch_best)
-        self.assertEqual(best['score'], 200)
-        self.assertEqual(accepted['score'], 170)
-        self.assertEqual(accepted['objective_improvement'], 70)
-        self.assertEqual(accepted['weights'], {'x': 2})
-        self.assertEqual(accepted['batch'], 2)
-        self.assertEqual(baseline, 100)
-
-    def test_batch_preserves_previous_best_when_trials_regress(self):
-        previous = {'score': 300, 'weights': {}}
-        with patch.object(optimizer, 'evaluate_candidate', return_value=(90, summary(), {})), \
-                contextlib.redirect_stdout(io.StringIO()) as out:
-            best, batch_best, accepted, baseline = optimizer.run_batch(
-                options(trials=1, json=False, until_improvement=True), [], {}, {},
-                random.Random(1), previous_best=previous, baseline_score=100)
-        self.assertIs(best, previous)
-        self.assertEqual(batch_best['score'], 90)
-        self.assertIsNone(accepted)
-        self.assertEqual(baseline, 100)
-        self.assertIn('batch=1 #1 score=90', out.getvalue())
-
-    def test_batch_text_prints_accepted_threshold_metrics_and_log_details(self):
-        with patch.object(optimizer, 'evaluate_candidate', return_value=(200, summary(), {'positions': 2})), \
-                contextlib.redirect_stdout(io.StringIO()) as out:
-            _, _, accepted, _ = optimizer.run_batch(options(trials=1, json=False), [], {}, {},
-                                                    random.Random(1), baseline_score=100)
-        self.assertTrue(accepted['valid_improvement'])
-        self.assertIn('logs positions=2', out.getvalue())
-        self.assertIn('accepted diff=200', out.getvalue())
-
-    def test_cli_saves_candidate_json_without_activating_weights(self):
+    def test_cli_rejects_activation_missing_base_and_existing_output(self):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
             base = root / 'base.json'
-            base.write_text('{"center_unit_value": 77}', encoding='utf-8')
-            output = root / 'candidate.json'
-            args = ['optimizer', '--trials', '1', '--base', str(base), '--output', str(output),
-                    '--tune-advantage-only', '--logs', 'fixture.log', '--json']
-            with patch('sys.argv', args), \
-                    patch.object(optimizer, 'evaluate_candidate', return_value=(100, summary(), None)) as evaluate, \
-                    patch.object(optimizer, 'time') as clock, \
-                    contextlib.redirect_stdout(io.StringIO()) as out:
-                clock.time.side_effect = [10, 12]
-                optimizer.main()
-            payload = json.loads(out.getvalue())
-            self.assertEqual(payload['baseline_path'], str(base))
-            self.assertEqual(payload['tuning_scope'], 'advantage_control')
-            self.assertEqual(payload['elapsed_seconds'], 2)
-            self.assertIsNone(payload['active_weights_path'])
-            self.assertEqual(json.loads(output.read_text())['center_unit_value'], 77)
-            self.assertEqual(evaluate.call_args.args[3], [Path('fixture.log')])
+            base.write_text('{"center_unit_value":80}')
+            bounds = root / 'bounds.json'
+            bounds.write_text('{"center_unit_value":[72,88]}')
+            common = ['--base', str(base), '--bounds', str(bounds), '--output-dir', str(root / 'out')]
+            for extra in (['--activate'], ['--base', str(root / 'missing.json')],
+                          ['--output-dir', str(root)], ['--output-dir', str(base)],
+                          ['--output-dir', str(root / 'weights' / 'active_weights.json')]):
+                with self.subTest(extra=extra), contextlib.redirect_stderr(io.StringIO()):
+                    with self.assertRaises(SystemExit):
+                        optimizer.main(common + extra)
 
-    def test_cli_stops_on_accepted_improvement_and_reports_thresholds(self):
+    def test_cli_dry_run_does_not_write_or_benchmark(self):
         with tempfile.TemporaryDirectory() as directory:
-            output = Path(directory) / 'candidate.json'
-            with patch('sys.argv', ['optimizer', '--trials', '2', '--base', '', '--output', str(output),
-                                    '--until-improvement', '--max-batches', '3', '--no-mirror-seeds', '--json']), \
-                    patch.object(optimizer, 'evaluate_candidate', side_effect=[
-                        (100, summary(), None), (200, summary(), None)]) as evaluate, \
-                    contextlib.redirect_stdout(io.StringIO()) as out:
-                optimizer.main()
-            payload = json.loads(out.getvalue())
-            self.assertTrue(payload['accepted_improvement'])
-            self.assertEqual(payload['best_score'], 200)
-            self.assertEqual(payload['objective_improvement'], 100)
-            self.assertEqual(payload['acceptance_thresholds']['min_diff'], 80)
-            self.assertFalse(payload['mirror_seeds'])
-            self.assertIsNone(payload['active_weights_path'])
-            self.assertEqual(evaluate.call_count, 2)
-            self.assertTrue(output.exists())
+            root = Path(directory)
+            base = root / 'base.json'
+            base.write_text('{"center_unit_value":80}')
+            bounds = root / 'bounds.json'
+            bounds.write_text('{"center_unit_value":[72,88]}')
+            with patch.object(optimizer, 'run_benchmark', create=True) as benchmark, contextlib.redirect_stdout(io.StringIO()) as output:
+                optimizer.main(['--base', str(base), '--bounds', str(bounds),
+                                '--output-dir', str(root / 'out'), '--dry-run'])
+            benchmark.assert_not_called()
+            self.assertFalse((root / 'out').exists())
+            self.assertEqual(json.loads(output.getvalue())['plan']['turns'], 400)
 
-    def test_cli_exhausts_batches_without_acceptance_and_prints_best(self):
+    def test_progressive_run_saves_all_candidates_and_stage_reports(self):
         with tempfile.TemporaryDirectory() as directory:
-            output = Path(directory) / 'candidate.json'
-            with patch('sys.argv', ['optimizer', '--trials', '1', '--base', '', '--output', str(output),
-                                    '--until-improvement', '--max-batches', '2']), \
-                    patch.object(optimizer, 'evaluate_candidate', return_value=(100, summary(), None)) as evaluate, \
-                    contextlib.redirect_stdout(io.StringIO()) as out:
-                optimizer.main()
-            self.assertEqual(evaluate.call_count, 2)
-            self.assertIn('batch 2/2', out.getvalue())
-            self.assertIn('best:', out.getvalue())
-            payload = json.loads(out.getvalue().split('best:\n')[1])
-            self.assertFalse(payload['accepted_improvement'])
-            self.assertIsNone(payload['baseline_path'])
-            self.assertEqual(payload['tuning_scope'], 'all')
-            self.assertEqual(json.loads(output.read_text()), bot_weights.DEFAULT_WEIGHTS)
+            root = Path(directory)
+            base = root / 'base.json'
+            base.write_text('{"center_unit_value":80}')
+            output = root / 'out'
+            plan = optimizer.build_plan(trials=6, top_b=3, top_c=2, a_seeds=1,
+                                        b_seeds=2, final_seeds=20, seed=10)
+            calls = []
+
+            def benchmark(**kwargs):
+                calls.append(kwargs)
+                summary = competitive(kwargs['seeds'], kwargs['repetitions'])
+                for pair in summary['pairs']['records']:
+                    pair['seed'] += kwargs['seed']
+                report = {'summary': summary, 'manifest': {'seeds': list(range(
+                    kwargs['seed'], kwargs['seed'] + kwargs['seeds']))}}
+                Path(kwargs['output']).write_text(json.dumps(report))
+                bot_weights.ACTIVE_WEIGHTS['center_unit_value'] = -123
+                return report
+
+            previous = dict(bot_weights.ACTIVE_WEIGHTS)
+            with patch.object(optimizer, 'run_benchmark', side_effect=benchmark):
+                result = optimizer.run_search(base, output, {'center_unit_value': (72, 88)}, plan, 7)
+            self.assertEqual(bot_weights.ACTIVE_WEIGHTS, previous)
+            self.assertEqual(len(calls), 11)
+            self.assertTrue(all(call['turns'] == 400 for call in calls))
+            self.assertEqual([call['seed'] for call in calls], [10] * 6 + [11] * 3 + [13] * 2)
+            self.assertEqual(len(list(output.glob('candidate-*.json'))), 6)
+            self.assertEqual(len(list(output.glob('benchmark-*.json'))), 11)
+            self.assertTrue((output / 'manifest.json').is_file())
+            self.assertTrue((output / 'summary.json').is_file())
+            self.assertTrue(result['accepted_improvement'])
+            self.assertTrue(all(not item['valid_improvement'] for item in result['index']
+                                if item['stage'] in ('A', 'B')))
+            self.assertEqual(json.loads(base.read_text()), {'center_unit_value': 80})
+            for candidate_id in {item['id'] for item in result['index']}:
+                records = [item for item in result['index'] if item['id'] == candidate_id]
+                self.assertEqual(len({item['weights_path'] for item in records}), 1)
+                self.assertEqual(len({item['candidate_value'] for item in records}), 1)
+
+    def test_failure_restores_exact_memory_and_retains_candidates(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            base = root / 'base.json'
+            base.write_text('{"center_unit_value":80}')
+            previous = dict(bot_weights.ACTIVE_WEIGHTS)
+
+            def broken(**kwargs):
+                bot_weights.ACTIVE_WEIGHTS.clear()
+                raise RuntimeError('benchmark failed')
+
+            with patch.object(optimizer, 'run_benchmark', side_effect=broken):
+                with self.assertRaisesRegex(RuntimeError, 'benchmark failed'):
+                    optimizer.run_search(base, root / 'out', {'center_unit_value': (72, 88)},
+                                         optimizer.build_plan(smoke=True), 7)
+            self.assertEqual(bot_weights.ACTIVE_WEIGHTS, previous)
+            self.assertTrue((root / 'out' / 'candidate-001.json').exists())
+            self.assertEqual(json.loads((root / 'out' / 'failure.json').read_text())['status'], 'failed')
+
+    def test_audit_defaults_are_current_centered_not_historical_intersections(self):
+        base = dict(bot_weights.DEFAULT_WEIGHTS, food_distance_cost=899, race_margin_value=332,
+                    fallback_cycle_penalty=376)
+        bounds = optimizer.load_bounds(None, base)
+        self.assertEqual(len(bounds), 16)
+        self.assertEqual(bounds['food_distance_cost'], (810, 988))
+        self.assertEqual(bounds['race_margin_value'], (299, 365))
+        self.assertEqual(bounds['fallback_cycle_penalty'], (339, 413))
+        self.assertNotIn('fallback_denial_reach_bonus', bounds)
+        self.assertFalse(any(key.startswith('iterative_search_') for key in bounds))
+
+    def test_only_one_audited_coordinate_changes_per_candidate(self):
+        base = dict(bot_weights.DEFAULT_WEIGHTS)
+        bounds = optimizer.load_bounds(None, base)
+        for seed in range(20):
+            candidate = optimizer.random_candidate(base, random.Random(seed), bounds)
+            changed = [key for key in base if base[key] != candidate[key]]
+            self.assertEqual(len(changed), 1)
+            self.assertIn(changed[0], bounds)
+            self.assertTrue(bounds[changed[0]][0] <= candidate[changed[0]] <= bounds[changed[0]][1])
+
+    def test_explicit_bounds_cannot_unfreeze_controls_or_exceed_local_radius(self):
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / 'bounds.json'
+            for payload in ({'race_margin_value': [630, 770]},
+                            {'iterative_search_weight_percent': [34, 36]},
+                            {'deep_extra_depth_margin': [2100, 2300]},
+                            {'dangerous_penalty': [6400, 6600]},
+                            {'food_distance_cost': [100, 1000]}):
+                path.write_text(json.dumps(payload))
+                if 'race_margin_value' in payload:
+                    self.assertEqual(optimizer.load_bounds(path, bot_weights.DEFAULT_WEIGHTS),
+                                     {'race_margin_value': (630, 770)})
+                else:
+                    with self.assertRaises(ValueError):
+                        optimizer.load_bounds(path, bot_weights.DEFAULT_WEIGHTS)
+
+    def test_budget_shrinks_final_seeds_but_keeps_at_least_eight_and_reserve(self):
+        plan = optimizer.build_plan(seconds_per_game=1, budget_minutes=1)
+        self.assertLessEqual(plan['estimated_games'], 48)
+        self.assertGreaterEqual(plan['stages'][2]['seeds'], 8)
+        self.assertGreaterEqual(plan['stages'][0]['candidates'], 4)
+        self.assertEqual(plan['overhead_reserve_fraction'], 0.2)
+
+    def test_repeat_regression_is_flagged_despite_positive_combined_record(self):
+        data = competitive(seeds=20, repetitions=2)
+        for pair in data['pairs']['records']:
+            if pair['repetition'] == 2:
+                pair.update(wins=0, losses=1, draws=1)
+        data.update(wins=40, losses=20, draws=20)
+        for side in data['by_candidate_side'].values():
+            side.update(wins=20, losses=10, draws=10)
+        result = optimizer.improvement_evidence(data, 2)
+        self.assertFalse(result['valid_improvement'])
+        self.assertIn('repeat_regression', result['reasons'])
+        self.assertEqual(result['by_repetition']['2']['net_wins'], -20)
+
+    def test_duplicate_or_incomplete_pairs_cannot_create_support(self):
+        for change in ('duplicate', 'missing_side', 'missing_repeat'):
+            data = competitive(repetitions=2)
+            if change == 'duplicate':
+                data['pairs']['records'].append(dict(data['pairs']['records'][0]))
+            elif change == 'missing_side':
+                data['pairs']['records'][0]['candidate_sides'] = ['A']
+            else:
+                data['pairs']['records'].pop()
+            with self.subTest(change=change), self.assertRaises(ValueError):
+                optimizer.improvement_evidence(data, 2)
+
+    def test_tied_pairs_and_draws_are_explicitly_inconclusive(self):
+        for tied_outcome in ('draws', 'split'):
+            data = competitive(seeds=8)
+            wins, losses, draws = (0, 0, 2) if tied_outcome == 'draws' else (1, 1, 0)
+            for pair in data['pairs']['records']:
+                pair.update(wins=wins, losses=losses, draws=draws)
+            data.update(wins=wins * 8, losses=losses * 8, draws=draws * 8)
+            for side in data['by_candidate_side'].values():
+                side.update(wins=wins * 4, losses=losses * 4, draws=draws * 4)
+            result = optimizer.improvement_evidence(data, 2)
+            self.assertFalse(result['valid_improvement'])
+            self.assertEqual(result['tied_seed_groups'], 8)
+            self.assertIsNone(result['wilson_lower'])
+
+    def test_stratified_candidates_cover_each_key_then_opposite_direction(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            base = root / 'base.json'
+            base.write_text('{}')
+            bounds = optimizer.load_bounds(None, bot_weights.DEFAULT_WEIGHTS)
+            plan = optimizer.build_plan(trials=32)
+            with patch.object(optimizer, 'run_benchmark', side_effect=RuntimeError('stop')):
+                with self.assertRaises(RuntimeError):
+                    optimizer.run_search(base, root / 'out', bounds, plan, 7)
+            values = [json.loads(path.read_text()) for path in sorted((root / 'out').glob('candidate-*.json'))]
+            changes = [{key: value for key, value in candidate.items()
+                        if value != bot_weights.DEFAULT_WEIGHTS[key]} for candidate in values]
+            self.assertEqual(len(changes), 32)
+            self.assertEqual({next(iter(change)) for change in changes[:16]}, set(bounds))
+            for first, second in zip(changes[:16], changes[16:]):
+                key = next(iter(first))
+                center = bot_weights.DEFAULT_WEIGHTS[key]
+                self.assertEqual(set(first), set(second))
+                self.assertLess((first[key] - center) * (second[key] - center), 0)
+
+    def test_benchmark_seed_grid_must_match_fresh_stage_plan(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            base = root / 'base.json'
+            base.write_text('{}')
+            with patch.object(optimizer, 'run_benchmark', return_value={'summary': competitive(seeds=1)}):
+                with self.assertRaisesRegex(ValueError, 'seed'):
+                    optimizer.run_search(base, root / 'out', optimizer.load_bounds(None, bot_weights.DEFAULT_WEIGHTS),
+                                         optimizer.build_plan(smoke=True, seed=1000), 7)
+
+    def test_cli_smoke_has_six_mirrored_games_and_never_claims_improvement(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            base = root / 'base.json'
+            base.write_text('{}')
+            calls = []
+
+            def benchmark(**kwargs):
+                calls.append(kwargs)
+                summary = competitive(seeds=1)
+                summary['pairs']['records'][0]['seed'] = kwargs['seed']
+                report = {'summary': summary}
+                Path(kwargs['output']).write_text(json.dumps(report))
+                return report
+
+            with patch.object(optimizer, 'run_benchmark', side_effect=benchmark), contextlib.redirect_stdout(io.StringIO()):
+                result = optimizer.main(['--base', str(base), '--output-dir', str(root / 'out'), '--smoke'])
+            self.assertEqual(len(calls), 3)
+            self.assertEqual(result['plan']['estimated_games'], 6)
+            self.assertFalse(result['accepted_improvement'])
+            self.assertFalse(result['best_candidate']['valid_improvement'])
+
+    def test_cli_requires_timing_for_run_and_rejects_invalid_geometry_and_bounds(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            base = root / 'base.json'
+            base.write_text('{}')
+            bounds = root / 'bad.json'
+            bounds.write_text('[]')
+            common = ['--base', str(base), '--output-dir', str(root / 'out')]
+            for extra in (['--run'], ['--food', '0'], ['--cols', '5'], ['--rows', '-1'],
+                          ['--bounds', str(bounds)], ['--seconds-per-game', 'nan', '--budget-minutes', '1'],
+                          ['--final-repetitions', '3'], ['--final-seeds', '7'], ['--trials', '0'],
+                          ['--seconds-per-game', '1']):
+                with self.subTest(extra=extra), contextlib.redirect_stderr(io.StringIO()):
+                    with self.assertRaises(SystemExit):
+                        optimizer.main(common + extra)
+            self.assertFalse((root / 'out').exists())
+
+    def test_cli_run_uses_budget_plan_without_actual_simulation(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            base = root / 'base.json'
+            base.write_text('{}')
+            with patch.object(optimizer, 'run_search', return_value={'status': 'completed'}) as run, \
+                    contextlib.redirect_stdout(io.StringIO()):
+                optimizer.main(['--base', str(base), '--output-dir', str(root / 'out'), '--run',
+                                '--seconds-per-game', '1', '--budget-minutes', '2'])
+            self.assertLessEqual(run.call_args.args[3]['estimated_seconds'], 96)
+
+    def test_exclusive_json_writer_preserves_existing_file(self):
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / 'important.json'
+            path.write_text('{"keep":true}')
+            with self.assertRaises(FileExistsError):
+                optimizer.write_json(path, {'keep': False})
+            self.assertEqual(json.loads(path.read_text()), {'keep': True})
+
+    def test_measured_throughput_rejects_hour_and_fits_eighty_game_three_hour_plan(self):
+        with self.assertRaises(ValueError):
+            optimizer.build_plan(seconds_per_game=104.69, budget_minutes=60)
+        plan = optimizer.build_plan(trials=12, top_b=4, top_c=2, a_seeds=1,
+                                    b_seeds=3, final_seeds=8, seconds_per_game=104.69,
+                                    budget_minutes=180)
+        self.assertEqual(plan['estimated_games'], 80)
+        self.assertEqual([stage['games'] for stage in plan['stages']], [24, 24, 32])
+        self.assertAlmostEqual(plan['estimated_seconds'], 8375.2)
+
+    def test_exhausted_sparse_strata_use_remaining_mutations_deterministically(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            base = root / 'base.json'
+            base.write_text('{"space_after_value":12,"center_unit_value":80}')
+            original = base.read_bytes()
+            previous = dict(bot_weights.ACTIVE_WEIGHTS)
+            bounds = {'space_after_value': (11, 13), 'center_unit_value': (72, 88)}
+            plan = optimizer.build_plan(trials=18, top_b=2, top_c=2, a_seeds=1,
+                                        b_seeds=2, final_seeds=8)
+
+            def benchmark(**kwargs):
+                summary = competitive(kwargs['seeds'], kwargs['repetitions'])
+                for pair in summary['pairs']['records']:
+                    pair['seed'] += kwargs['seed']
+                report = {'summary': summary}
+                Path(kwargs['output']).write_text(json.dumps(report))
+                return report
+
+            runs = []
+            for name in ('first', 'second'):
+                with patch.object(optimizer, 'run_benchmark', side_effect=benchmark):
+                    result = optimizer.run_search(base, root / name, bounds, plan, 7)
+                candidates = [json.loads(path.read_text())
+                              for path in sorted((root / name).glob('candidate-*.json'))]
+                effective = dict(bot_weights.DEFAULT_WEIGHTS, space_after_value=12, center_unit_value=80)
+                changes = [tuple((key, value) for key, value in candidate.items()
+                                 if effective[key] != value) for candidate in candidates]
+                self.assertEqual(len(changes), 18)
+                self.assertEqual(len(set(changes)), 18)
+                self.assertTrue(all(len(change) == 1 for change in changes))
+                self.assertEqual({value for change in changes for key, value in change
+                                  if key == 'space_after_value'}, {11, 13})
+                self.assertEqual({value for change in changes for key, value in change
+                                  if key == 'center_unit_value'}, set(range(72, 89)) - {80})
+                self.assertEqual(result['status'], 'completed')
+                runs.append(changes)
+            self.assertEqual(runs[0], runs[1])
+            self.assertEqual(base.read_bytes(), original)
+            self.assertEqual(bot_weights.ACTIVE_WEIGHTS, previous)
+
+    def test_insufficient_total_mutations_rejects_before_any_exports_or_benchmark(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            base = root / 'base.json'
+            base.write_text('{"space_after_value":12}')
+            original = base.read_bytes()
+            previous = dict(bot_weights.ACTIVE_WEIGHTS)
+            output = root / 'out'
+            with patch.object(optimizer, 'run_benchmark') as benchmark:
+                with self.assertRaisesRegex(ValueError, '3.*2'):
+                    optimizer.run_search(base, output, {'space_after_value': (11, 13)},
+                                         optimizer.build_plan(trials=3, top_b=2), 7)
+            benchmark.assert_not_called()
+            self.assertFalse(output.exists())
+            self.assertEqual(base.read_bytes(), original)
+            self.assertEqual(bot_weights.ACTIVE_WEIGHTS, previous)
+
+
+if __name__ == '__main__':
+    unittest.main()

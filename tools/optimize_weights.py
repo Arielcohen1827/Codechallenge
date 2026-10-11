@@ -1,363 +1,353 @@
+"""Progressive mirrored weight search; outputs are never activated."""
+
 import argparse
 import json
+import math
 import random
+import statistics
 import time
 from pathlib import Path
 
-from tools.bot_lab import evaluate_log_decisions, expand_log_paths, simulate_game, summarize_simulations
-from snake_bot.bot_weights import DEFAULT_WEIGHTS, load_weights, reset_active_weights, save_weights, set_active_weights
+from snake_bot import bot_weights
+from tools.benchmark_bot import load_configuration, run_benchmark
 
 
-TUNABLE_RANGES = {
-    'food_distance_cost': (350, 900),
-    'race_margin_value': (300, 1200),
-    'hunger_value': (80, 420),
-    'space_after_value': (6, 35),
-    'exits_after_value': (80, 700),
-    'tail_reachable_bonus': (0, 1400),
-    'center_unit_value': (20, 180),
-    'edge_depth_value': (80, 1000),
-    'center_edge0_penalty': (800, 8000),
-    'center_edge1_penalty': (0, 3500),
-    'next_food_value': (40, 450),
-    'chain_food_value': (80, 650),
-    'chain_race_value': (40, 450),
-    'chain_close_food_bonus': (0, 2200),
-    'hunger_close_food_value': (20, 220),
-    'denial_food_bonus': (300, 3600),
-    'denial_chain_bonus': (100, 1800),
-    'rival_food_threat_value': (100, 1000),
-    'rival_chain_threat_value': (60, 700),
-    'rival_chain_ignore_penalty': (400, 4000),
-    'advantage_min_lead': (1200, 2600),
-    'advantage_max_activation_lead': (1800, 4000),
-    'advantage_threat_ratio': (40, 120),
-    'advantage_score_buffer': (500, 1600),
-    'advantage_min_body': (7, 12),
-    'advantage_body_deficit': (0, 4),
-    'advantage_enemy_cell_value': (50, 350),
-    'advantage_our_cell_value': (0, 120),
-    'advantage_enemy_move_reduction': (500, 5000),
-    'advantage_food_delay_value': (500, 5000),
-    'advantage_food_unreachable_bonus': (3000, 30_000),
-    'advantage_enemy_food_penalty': (5000, 45_000),
-    'advantage_switch_margin': (2500, 12_000),
-    'advantage_adjacent_food_switch_margin': (8000, 30_000),
-    'current_target_bonus': (0, 3200),
-    'safe_bonus': (700, 4000),
-    'acceptable_risk_bonus': (-500, 1800),
-    'dangerous_penalty': (2500, 16_000),
-    'lost_race_penalty': (6000, 40_000),
-    'non_immediate_edge_food_penalty': (1500, 14_000),
-    'low_space_food_penalty': (6000, 28_000),
-    'long_low_space_food_penalty': (3000, 24_000),
-    'one_exit_food_penalty': (3000, 18_000),
-    'position_edge0_penalty': (1500, 14_000),
-    'position_edge1_penalty': (0, 5000),
-    'position_edge2_penalty': (0, 2200),
-    'position_corner_penalty': (0, 9000),
-    'zero_escape_penalty': (5000, 20_000),
-    'delayed_zero_penalty': (9000, 40_000),
-    'one_escape_penalty': (800, 7000),
-    'small_region_penalty': (600, 3500),
-    'one_exit_penalty': (1000, 9000),
-    'territory_gap_penalty': (80, 600),
-    'hot_lost_food_base': (500, 6000),
-    'hot_lost_food_enemy_bonus': (300, 3000),
-    'fallback_progress_value': (300, 2200),
-    'fallback_hunger_progress_value': (20, 180),
-    'fallback_food_distance_cost': (20, 220),
-    'fallback_hunger_food_progress': (40, 320),
-    'fallback_hunger_food_distance': (10, 160),
-    'fallback_hunger_food_race': (20, 240),
-    'fallback_denial_progress': (30, 450),
-    'fallback_denial_reach_bonus': (100, 1800),
-    'fallback_cycle_penalty': (100, 1500),
-    'fallback_danger_penalty': (3000, 20_000),
-}
-
-ADVANTAGE_TUNABLE_KEYS = tuple(
-    key for key in TUNABLE_RANGES if key.startswith('advantage_')
+SAFE_TUNABLE_KEYS = (
+    'food_distance_cost', 'race_margin_value', 'hunger_value', 'space_after_value',
+    'exits_after_value', 'tail_reachable_bonus', 'center_unit_value', 'edge_depth_value',
+    'next_food_value', 'chain_food_value', 'chain_race_value', 'chain_close_food_bonus',
+    'hunger_close_food_value', 'current_target_bonus', 'fallback_denial_progress',
+    'fallback_cycle_penalty',
 )
+MIN_INFORMATIVE_SEEDS = 8
 
 
-def random_candidate(base_weights, rng, tunable_ranges):
+def random_candidate(base_weights, rng, tunable_ranges, key=None, direction=None):
     weights = dict(base_weights)
-    for key, (low, high) in tunable_ranges.items():
-        weights[key] = rng.randint(low, high)
+    key = key or rng.choice(list(tunable_ranges))
+    low, high = tunable_ranges[key]
+    center = base_weights[key]
+    direction = direction or rng.choice((-1, 1))
+    weights[key] = rng.randint(low, center - 1) if direction < 0 else rng.randint(center + 1, high)
     return weights
 
 
-def mutate_candidate(base, rng, strength, tunable_ranges):
-    weights = dict(base)
-    for key, (low, high) in tunable_ranges.items():
-        if rng.random() > 0.65:
-            continue
-        value = weights[key]
-        factor = rng.uniform(1 - strength, 1 + strength)
-        weights[key] = max(low, min(high, int(value * factor)))
-    return weights
+def competitive_rank(summary):
+    total = max(1, summary['total'])
+    return (summary['wins'] / total, -summary['losses'] / total,
+            summary['draws'] / total, summary['median_score_diff'] or 0,
+            summary['mean_score_diff'] or 0)
 
 
-def simulation_score(summary):
-    candidate_games = max(1, summary.get('candidate_games', 0))
-    win_rate = summary.get('candidate_wins', 0) / candidate_games
-    loss_rate = summary.get('candidate_losses', 0) / candidate_games
-    return (
-        summary['avg_candidate_score'] * 3.0
-        + summary['avg_candidate_score_diff'] * 5.5
-        + win_rate * 1400
-        - loss_rate * 900
-        + summary['avg_turns'] * 12
-        + summary['food_per_100_turns'] * 80
-        + summary['avg_center_score'] * 0.12
-        - summary['edge_moves_per_100_turns'] * 45
-        - summary.get('candidate_deaths', 0) * 2500
-        + summary.get('opponent_deaths', 0) * 700
-        - summary.get('candidate_wall_hits', 0) * 900
-        + summary.get('opponent_wall_hits', 0) * 250
-    )
+def improvement_evidence(summary, finalists):
+    grouped = {}
+    seen = set()
+    repeat_stats = {}
+    for pair in summary['pairs']['records']:
+        identity = (pair['seed'], pair['repetition'])
+        if (identity in seen or set(pair['candidate_sides']) != {'A', 'B'}
+                or len(pair['candidate_sides']) != 2
+                or any(type(pair[key]) is not int or pair[key] < 0
+                       for key in ('wins', 'losses', 'draws'))
+                or sum(pair[key] for key in ('wins', 'losses', 'draws')) != 2):
+            raise ValueError('Evidence requires complete unique mirrored seed/repetition pairs.')
+        seen.add(identity)
+        grouped.setdefault(pair['seed'], []).append(pair)
+        stats = repeat_stats.setdefault(str(pair['repetition']), {'wins': 0, 'losses': 0, 'draws': 0})
+        for key in stats:
+            stats[key] += pair[key]
+    repeats = {pair['repetition'] for pairs in grouped.values() for pair in pairs}
+    if (any({p['repetition'] for p in pairs} != repeats for pairs in grouped.values())
+            or 2 * len(seen) != summary['total']
+            or any(sum(stats[key] for stats in repeat_stats.values()) != summary[key]
+                   for key in ('wins', 'losses', 'draws'))):
+        raise ValueError('Evidence counts or repetitions disagree with the competitive summary.')
+    for stats in repeat_stats.values():
+        stats['net_wins'] = stats['wins'] - stats['losses']
+    records = []
+    for seed, pairs in sorted(grouped.items()):
+        records.append({'seed': seed, 'repetitions': len(pairs),
+                        'net_wins': sum(p['wins'] - p['losses'] for p in pairs),
+                        'draw_games': sum(p['draws'] for p in pairs),
+                        'score_diff_sum': sum(p['score_diff_sum'] for p in pairs)})
+    positive = sum(record['net_wins'] > 0 for record in records)
+    negative = sum(record['net_wins'] < 0 for record in records)
+    informative = positive + negative
+    alpha = 0.05 / max(1, finalists)
+    z = statistics.NormalDist().inv_cdf(1 - alpha)
+    lower = None
+    if informative:
+        proportion = positive / informative
+        lower = ((proportion + z * z / (2 * informative)
+                  - z * math.sqrt(proportion * (1 - proportion) / informative
+                                  + z * z / (4 * informative * informative)))
+                 / (1 + z * z / informative))
+    sides = summary['by_candidate_side']
+    reasons = []
+    if sides['A']['total'] != sides['B']['total'] or not sides['A']['total']:
+        reasons.append('unbalanced_candidate_sides')
+    if summary['wins'] <= summary['losses']:
+        reasons.append('nonpositive_competitive_record')
+    if informative < MIN_INFORMATIVE_SEEDS:
+        reasons.append('insufficient_independent_seed_evidence')
+    if lower is None or lower <= 0.5:
+        reasons.append('paired_support_inconclusive')
+    if any(stats['net_wins'] < 0 for stats in repeat_stats.values()):
+        reasons.append('repeat_regression')
+    return {'valid_improvement': not reasons, 'reasons': reasons,
+            'seed_groups': len(records), 'informative_seed_groups': informative,
+            'positive_seed_groups': positive, 'negative_seed_groups': negative,
+            'tied_seed_groups': len(records) - informative,
+            'draw_games': summary['draws'], 'wilson_lower': lower,
+            'adjusted_one_sided_alpha': alpha, 'finalists_compared': finalists,
+            'minimum_informative_seed_groups': MIN_INFORMATIVE_SEEDS,
+            'seed_records': records,
+            'by_repetition': repeat_stats,
+            'limitations': 'Self-play evidence, not a guarantee against other opponents.'}
 
 
-def log_score(summary):
-    positions = max(1, summary.get('positions', 0))
-    unsafe = summary.get('safety_DANGEROUS', 0) + summary.get('safety_SUICIDAL', 0)
-    edge_rate = summary.get('edge_or_corner_move', 0) * 100 / positions
-    food_rate = summary.get('food_taken_now', 0) * 100 / positions
-    return food_rate * 90 - edge_rate * 18 - unsafe * 1200
+def build_plan(trials=12, top_b=4, top_c=2, a_seeds=2, b_seeds=6,
+               final_seeds=24, repetitions=1, seed=1, seconds_per_game=None,
+               budget_minutes=None, smoke=False):
+    counts = (trials, top_b, top_c, a_seeds, b_seeds, final_seeds, repetitions)
+    if any(value <= 0 for value in counts) or repetitions not in (1, 2):
+        raise ValueError('Counts must be positive; final repetitions must be 1 or 2.')
+    if not smoke and (top_c not in (2, 3) or trials < top_c or top_b < top_c or final_seeds < 8):
+        raise ValueError('Use 2 or 3 finalists, enough A/B candidates and >=8 final seeds, or --smoke.')
+    if (seconds_per_game is None) != (budget_minutes is None):
+        raise ValueError('Provide both --seconds-per-game and --budget-minutes.')
+    if seconds_per_game is not None and (
+            not math.isfinite(seconds_per_game) or not math.isfinite(budget_minutes)
+            or seconds_per_game <= 0 or budget_minutes <= 0):
+        raise ValueError('Timing estimates and budget must be finite positive numbers.')
+    if smoke:
+        trials = top_b = top_c = a_seeds = b_seeds = final_seeds = repetitions = 1
+    top_b = min(top_b, trials)
+    top_c = min(top_c, top_b)
+
+    def games():
+        return 2 * (trials * a_seeds + top_b * b_seeds + top_c * final_seeds * repetitions)
+
+    if seconds_per_game is not None:
+        while games() * seconds_per_game > budget_minutes * 60 * 0.8:
+            options = []
+            if trials > max(top_b, min(counts[0], 2 * top_c)):
+                options.append((trials * a_seeds, 'trials'))
+            if top_b > top_c:
+                options.append((top_b * b_seeds, 'top_b'))
+            if b_seeds > 2 and not smoke:
+                options.append((top_b * b_seeds, 'b_seeds'))
+            if a_seeds > 1:
+                options.append((trials * a_seeds, 'a_seeds'))
+            if final_seeds > 8 and not smoke:
+                options.append((top_c * final_seeds * repetitions, 'final_seeds'))
+            if not options:
+                raise ValueError('Budget cannot fit the minimum plan; use --dry-run or explicit --smoke.')
+            dimension = max(options)[1]
+            if dimension == 'trials':
+                trials -= 1
+            elif dimension == 'top_b':
+                top_b -= 1
+            elif dimension == 'b_seeds':
+                b_seeds -= 1
+            elif dimension == 'a_seeds':
+                a_seeds -= 1
+            else:
+                final_seeds -= 1
+    stages = []
+    for name, candidates, seeds, repeats in (
+            ('A', trials, a_seeds, 1), ('B', top_b, b_seeds, 1),
+            ('C', top_c, final_seeds, repetitions)):
+        stages.append({'name': name, 'candidates': candidates, 'seed': seed,
+                       'seeds': seeds, 'repetitions': repeats,
+                       'games': 2 * candidates * seeds * repeats})
+        seed += seeds
+    return {'turns': 400, 'mirror_seeds': True, 'stages': stages,
+            'estimated_games': games(), 'seconds_per_game': seconds_per_game,
+            'estimated_seconds': games() * seconds_per_game if seconds_per_game else None,
+            'budget_minutes': budget_minutes, 'smoke': smoke, 'overhead_reserve_fraction': 0.2,
+            'budget_note': 'Plan is approximate; unknown game duration prevents a hard deadline.',
+            'evidence_note': 'A/B provisional; C uses fresh seeds, repeats grouped by seed.'}
 
 
-def evaluate_candidate(weights, baseline_weights, args, log_paths):
-    results = []
-    for offset in range(args.games):
-        sides = ('A', 'B') if args.mirror_seeds else ('A' if offset % 2 == 0 else 'B',)
-        for candidate_side in sides:
-            weights_by_side = {
-                candidate_side: weights,
-                'B' if candidate_side == 'A' else 'A': baseline_weights,
-            }
-            results.append(
-                simulate_game(
-                    args.seed + offset,
-                    args.turns,
-                    args.rows,
-                    args.cols,
-                    args.food,
-                    weights_by_side=weights_by_side,
-                    candidate_side=candidate_side,
-                )
-            )
-    sim_summary = summarize_simulations(results)
-    score = simulation_score(sim_summary)
-    log_summary = None
-    if log_paths:
-        set_active_weights(weights)
-        log_summary = evaluate_log_decisions(log_paths, args.max_log_positions or None)
-        score += log_score(log_summary)
-    return score, sim_summary, log_summary
+def validate_output(output, inputs):
+    output = Path(output).resolve()
+    parts = {part.lower() for part in output.parts}
+    if (output.exists() or output in inputs or any(output in path.parents for path in inputs)
+            or parts & {'weights', 'logs', 'active_weights.json', 'best_weights.json'}
+            or output.suffix):
+        raise ValueError('Output must be a new directory outside weights, logs and input paths.')
+    return output
 
 
-def is_valid_improvement(record, args, baseline_score):
-    sim = record['simulation']
-    logs = record.get('logs') or {}
-    unsafe_logs = logs.get('safety_DANGEROUS', 0) + logs.get('safety_SUICIDAL', 0)
-    if record['score'] < baseline_score + args.min_objective_improvement:
-        return False
-    if sim['avg_candidate_score_diff'] < args.min_diff:
-        return False
-    if args.require_winning_record and sim['candidate_wins'] <= sim['candidate_losses']:
-        return False
-    if sim['candidate_deaths'] > args.max_candidate_deaths:
-        return False
-    if sim.get('candidate_wall_hits', 0) > args.max_candidate_wall_hits:
-        return False
-    if sim['edge_moves_per_100_turns'] > args.max_edge100:
-        return False
-    if sim['food_per_100_turns'] < args.min_food100:
-        return False
-    if unsafe_logs > args.max_log_unsafe:
-        return False
-    return True
+def load_bounds(path, base):
+    raw = json.loads(Path(path).read_text(encoding='utf-8')) if path else {
+        key: (base[key] - max(1, abs(base[key]) // 10),
+              base[key] + max(1, abs(base[key]) // 10)) for key in SAFE_TUNABLE_KEYS}
+    return validate_bounds(raw, base)
 
 
-def print_candidate(rank, score, sim_summary, log_summary=None):
-    losses = sim_summary.get('candidate_losses', 0)
-    print(
-        f"#{rank} score={round(score, 2)} "
-        f"game_score={sim_summary['avg_candidate_score']} "
-        f"diff={sim_summary['avg_candidate_score_diff']} "
-        f"w={sim_summary['candidate_wins']}-{losses}/{sim_summary['candidate_games']} "
-        f"turns={sim_summary['avg_turns']} "
-        f"food100={sim_summary['food_per_100_turns']} "
-        f"edge100={sim_summary['edge_moves_per_100_turns']} "
-        f"center={sim_summary['avg_center_score']} "
-        f"deaths={sim_summary['deaths_A'] + sim_summary['deaths_B']} "
-        f"wall_hits={sim_summary.get('wall_hits_A', 0) + sim_summary.get('wall_hits_B', 0)}"
-    )
-    if log_summary:
-        print(
-            f"   logs positions={log_summary.get('positions', 0)} "
-            f"food_now={log_summary.get('food_taken_now', 0)} "
-            f"edge={log_summary.get('edge_or_corner_move', 0)} "
-            f"danger={log_summary.get('safety_DANGEROUS', 0)} "
-            f"suicidal={log_summary.get('safety_SUICIDAL', 0)}"
-        )
+def validate_bounds(raw, base):
+    if not isinstance(raw, dict) or not raw:
+        raise ValueError('Bounds must be a nonempty JSON object.')
+    bounds = {}
+    for key, limits in raw.items():
+        if (key not in SAFE_TUNABLE_KEYS or key not in base
+                or not isinstance(limits, (list, tuple)) or len(limits) != 2
+                or any(type(value) is not int for value in limits)):
+            raise ValueError('Bounds must name supported coefficients, never strategy/depth/time controls.')
+        low, high = limits
+        center = base[key]
+        radius = max(1, abs(center) // 10)
+        if not center - radius <= low < center < high <= center + radius:
+            raise ValueError('Bounds must straddle the current base within 10 percent (minimum one unit).')
+        bounds[key] = (low, high)
+    return bounds
 
 
-def make_candidate(index, best, base_weights, tunable_ranges, rng):
-    if index == 1:
-        return dict(base_weights)
-    if best and rng.random() < 0.55:
-        return mutate_candidate(best['weights'], rng, strength=0.30, tunable_ranges=tunable_ranges)
-    return random_candidate(base_weights, rng, tunable_ranges)
+def write_json(path, payload):
+    with Path(path).open('x', encoding='utf-8') as stream:
+        stream.write(json.dumps(payload, indent=2, sort_keys=True, allow_nan=False) + '\n')
 
 
-def run_batch(
-    args,
-    log_paths,
-    baseline_weights,
-    tunable_ranges,
-    rng,
-    batch_index=1,
-    previous_best=None,
-    baseline_score=None,
-):
-    best = previous_best
-    batch_best = None
-    accepted = None
-    for index in range(1, args.trials + 1):
-        weights = make_candidate(index, best, baseline_weights, tunable_ranges, rng)
-        score, sim_summary, log_summary = evaluate_candidate(weights, baseline_weights, args, log_paths)
-        if baseline_score is None:
-            baseline_score = score
-        record = {
-            'score': score,
-            'weights': dict(weights),
-            'simulation': sim_summary,
-            'logs': log_summary,
-            'batch': batch_index,
-            'trial': index,
-            'valid_improvement': False,
+def run_search(base_path, output, bounds, plan, seed, rows=0, cols=0, food=5):
+    previous = dict(bot_weights.ACTIVE_WEIGHTS)
+    index = []
+    started = time.monotonic()
+    try:
+        baseline = load_configuration(base_path)
+        bounds = validate_bounds(bounds, baseline['effective_weights'])
+        output = validate_output(output, {Path(base_path).resolve()})
+        trials = plan['stages'][0]['candidates']
+        capacity = sum(high - low for low, high in bounds.values())
+        if trials > capacity:
+            raise ValueError(f'Requested {trials} candidates but only {capacity} distinct local mutations are available.')
+        output.mkdir(parents=True, exist_ok=False)
+        reference = output / 'reference.json'
+        write_json(reference, baseline['effective_weights'])
+        rng = random.Random(seed)
+        keys = list(bounds)
+        rng.shuffle(keys)
+        directions = {key: rng.choice((-1, 1)) for key in keys}
+        strata = [(key, directions[key]) for key in keys] + [(key, -directions[key]) for key in keys]
+        remaining = {
+            (key, direction): list(range(low, baseline['effective_weights'][key])) if direction < 0
+            else list(range(baseline['effective_weights'][key] + 1, high + 1))
+            for key, (low, high) in bounds.items() for direction in (-1, 1)
         }
-        record['objective_improvement'] = round(score - baseline_score, 2)
-        record['valid_improvement'] = is_valid_improvement(record, args, baseline_score)
-        if best is None or score > best['score']:
-            best = record
-        if batch_best is None or score > batch_best['score']:
-            batch_best = record
-        if accepted is None and record['valid_improvement']:
-            accepted = record
-        if not args.json:
-            prefix = f"batch={batch_index} " if args.until_improvement else ""
-            print(prefix, end="")
-            print_candidate(index, score, sim_summary, log_summary)
-            if record['valid_improvement']:
-                print(
-                    f"   accepted diff={sim_summary['avg_candidate_score_diff']} "
-                    f"edge100={sim_summary['edge_moves_per_100_turns']} "
-                    f"food100={sim_summary['food_per_100_turns']}"
-                )
-    return best, batch_best, accepted, baseline_score
+        candidates = []
+        for number in range(1, trials + 1):
+            for offset in range(len(strata)):
+                key, direction = strata[(number - 1 + offset) % len(strata)]
+                if remaining[key, direction]:
+                    break
+            values = remaining[key, direction]
+            weights = dict(baseline['effective_weights'])
+            weights[key] = values.pop(rng.randrange(len(values)))
+            candidate = {'id': number, 'weights_path': str(output / f'candidate-{number:03d}.json'),
+                         'changed_key': key, 'base_value': baseline['effective_weights'][key],
+                         'candidate_value': weights[key]}
+            write_json(candidate['weights_path'], weights)
+            candidates.append(candidate)
+        write_json(output / 'manifest.json', {
+            'version': 7, 'baseline': baseline, 'plan': plan,
+            'bounds': bounds, 'candidate_seed': seed, 'candidates': candidates,
+            'sampled_keys': sorted({c['changed_key'] for c in candidates}),
+            'unsampled_keys': sorted(set(bounds) - {c['changed_key'] for c in candidates}),
+            'simulator_parameters': {'turns': 400, 'rows': rows, 'cols': cols, 'food': food},
+            'selection': 'Competitive record, then median/mean score difference; diagnostics excluded.',
+        })
+        survivors = candidates
+        for stage in plan['stages']:
+            ranked = []
+            for candidate in survivors[:stage['candidates']]:
+                report_path = output / f"benchmark-{stage['name']}-{candidate['id']:03d}.json"
+                if report_path.exists():
+                    raise ValueError('Refusing to overwrite a benchmark report.')
+                report = run_benchmark(
+                    reference=reference, candidate=Path(candidate['weights_path']),
+                    seeds=stage['seeds'], seed=stage['seed'], repetitions=stage['repetitions'],
+                    output=report_path, turns=400, rows=rows, cols=cols, food=food)
+                summary = report['summary']
+                expected_pairs = {(game_seed, repeat)
+                                  for game_seed in range(stage['seed'], stage['seed'] + stage['seeds'])
+                                  for repeat in range(1, stage['repetitions'] + 1)}
+                pairs = summary['pairs']['records']
+                if (len(pairs) != len(expected_pairs)
+                        or {(pair['seed'], pair['repetition']) for pair in pairs} != expected_pairs):
+                    raise ValueError('Benchmark seed/repetition grid disagrees with the fresh stage plan.')
+                record = {**candidate, 'stage': stage['name'], 'report_path': str(report_path),
+                          'rank': competitive_rank(summary), 'summary': summary,
+                          'valid_improvement': False, 'status': 'provisional'}
+                if stage['name'] == 'C':
+                    evidence = improvement_evidence(summary, len(survivors[:stage['candidates']]))
+                    record['evidence'] = evidence
+                    record['valid_improvement'] = evidence['valid_improvement'] and not plan['smoke']
+                    record['status'] = 'supported' if record['valid_improvement'] else 'inconclusive'
+                index.append(record)
+                ranked.append(record)
+            ranked.sort(key=lambda item: item['rank'], reverse=True)
+            survivors = ranked
+            write_json(output / f"index-{stage['name']}.json", ranked)
+        accepted = next((item for item in survivors if item['valid_improvement']), None)
+        result = {'version': 7, 'status': 'completed', 'plan': plan, 'index': index,
+                  'best_candidate': survivors[0], 'accepted_candidate': accepted,
+                  'accepted_improvement': accepted is not None,
+                  'elapsed_seconds': time.monotonic() - started,
+                  'active_weights_written': False}
+        write_json(output / 'summary.json', result)
+        return result
+    except Exception as error:
+        if index or ('candidates' in locals() and output.is_dir()):
+            write_json(output / 'failure.json', {'status': 'failed', 'error_type': type(error).__name__,
+                                               'index': index, 'accepted_improvement': False})
+        raise
+    finally:
+        bot_weights.ACTIVE_WEIGHTS.clear()
+        bot_weights.ACTIVE_WEIGHTS.update(previous)
 
 
-def main():
-    parser = argparse.ArgumentParser(description='Random-search optimizer for Snake bot weights.')
-    parser.add_argument('--trials', type=int, default=24)
-    parser.add_argument('--games', type=int, default=4)
-    parser.add_argument('--seed', type=int, default=1)
-    parser.add_argument('--turns', type=int, default=80)
-    parser.add_argument('--rows', type=int, default=0, help='0 randomizes the dimension from 12 to 20')
-    parser.add_argument('--cols', type=int, default=0, help='0 randomizes the dimension from 12 to 20')
-    parser.add_argument('--food', type=int, default=5)
-    parser.add_argument('--logs', nargs='*', default=())
-    parser.add_argument('--max-log-positions', type=int, default=300)
-    parser.add_argument('--output', default='weights/best_weights.json')
-    parser.add_argument('--base', default='weights/active_weights.json')
-    parser.add_argument('--tune-advantage-only', action='store_true')
-    parser.add_argument('--activate', action='store_true')
-    parser.add_argument('--no-mirror-seeds', action='store_false', dest='mirror_seeds')
-    parser.set_defaults(mirror_seeds=True)
-    parser.add_argument('--until-improvement', action='store_true')
-    parser.add_argument('--max-batches', type=int, default=8)
-    parser.add_argument('--min-diff', type=float, default=80)
-    parser.add_argument('--min-objective-improvement', type=float, default=50)
-    parser.add_argument('--max-edge100', type=float, default=50)
-    parser.add_argument('--min-food100', type=float, default=13)
-    parser.add_argument('--max-candidate-deaths', type=int, default=0)
-    parser.add_argument('--max-candidate-wall-hits', type=int, default=0)
-    parser.add_argument('--max-log-unsafe', type=int, default=0)
-    parser.add_argument('--allow-losing-record', action='store_false', dest='require_winning_record')
-    parser.set_defaults(require_winning_record=True)
-    parser.add_argument('--json', action='store_true')
-    args = parser.parse_args()
-
-    rng = random.Random(args.seed)
-    log_paths = expand_log_paths(args.logs) if args.logs else []
-    baseline_weights = load_weights(args.base) if args.base and Path(args.base).exists() else dict(DEFAULT_WEIGHTS)
-    tunable_ranges = (
-        {key: TUNABLE_RANGES[key] for key in ADVANTAGE_TUNABLE_KEYS}
-        if args.tune_advantage_only
-        else TUNABLE_RANGES
-    )
-    best = None
-    accepted = None
-    baseline_score = None
-
-    started = time.time()
-    batches = args.max_batches if args.until_improvement else 1
-    for batch_index in range(1, batches + 1):
-        if args.until_improvement and not args.json:
-            print(f"batch {batch_index}/{batches}")
-        best, _, accepted, baseline_score = run_batch(
-            args,
-            log_paths,
-            baseline_weights,
-            tunable_ranges,
-            rng,
-            batch_index,
-            best,
-            baseline_score,
-        )
-        if accepted:
-            best = accepted
-            break
-
-    save_weights(args.output, best['weights'])
-    active_path = None
-    if args.activate and (not args.until_improvement or accepted):
-        save_weights('weights/active_weights.json', best['weights'])
-        active_path = 'weights/active_weights.json'
-    reset_active_weights()
-
-    result = {
-        'best_score': round(best['score'], 2),
-        'best_weights_path': args.output,
-        'active_weights_path': active_path,
-        'accepted_improvement': bool(accepted),
-        'baseline_path': args.base if args.base and Path(args.base).exists() else None,
-        'tuning_scope': 'advantage_control' if args.tune_advantage_only else 'all',
-        'objective_improvement': best.get('objective_improvement', 0),
-        'mirror_seeds': args.mirror_seeds,
-        'elapsed_seconds': round(time.time() - started, 2),
-        'simulation': best['simulation'],
-        'logs': best['logs'],
-    }
-    if args.until_improvement:
-        result['acceptance_thresholds'] = {
-            'min_diff': args.min_diff,
-            'min_objective_improvement': args.min_objective_improvement,
-            'max_edge100': args.max_edge100,
-            'min_food100': args.min_food100,
-            'max_candidate_deaths': args.max_candidate_deaths,
-            'max_candidate_wall_hits': args.max_candidate_wall_hits,
-            'max_log_unsafe': args.max_log_unsafe,
-            'require_winning_record': args.require_winning_record,
-        }
-    if args.json:
-        print(json.dumps(result, indent=2, sort_keys=True))
-    else:
-        print('best:')
-        print(json.dumps(result, indent=2, sort_keys=True))
+def main(argv=None):
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument('--base', type=Path, required=True)
+    parser.add_argument('--output-dir', '--output', dest='output_dir', type=Path, required=True)
+    parser.add_argument('--bounds', type=Path)
+    mode = parser.add_mutually_exclusive_group()
+    mode.add_argument('--dry-run', action='store_true')
+    mode.add_argument('--run', action='store_true')
+    mode.add_argument('--smoke', action='store_true')
+    for name, default in (('trials', 12), ('top-b', 4), ('top-c', 2),
+                          ('stage-a-seeds', 2), ('stage-b-seeds', 6),
+                          ('final-seeds', 24), ('final-repetitions', 1),
+                          ('seed', 1), ('rows', 0), ('cols', 0), ('food', 5)):
+        parser.add_argument('--' + name, type=int, default=default)
+    parser.add_argument('--seconds-per-game', type=float)
+    parser.add_argument('--budget-minutes', type=float)
+    args = parser.parse_args(argv)
+    try:
+        base = load_configuration(args.base)
+        bounds = load_bounds(args.bounds, base['effective_weights'])
+        inputs = {args.base.resolve()}
+        if args.bounds:
+            inputs.add(args.bounds.resolve())
+        output = validate_output(args.output_dir, inputs)
+        if args.rows < 0 or (args.cols != 0 and args.cols < 6) or not 1 <= args.food <= 9:
+            raise ValueError('Rows must be 0 or >=1, cols 0 or >=6, food 1..9.')
+        plan = build_plan(args.trials, args.top_b, args.top_c, args.stage_a_seeds,
+                          args.stage_b_seeds, args.final_seeds, args.final_repetitions,
+                          args.seed, args.seconds_per_game, args.budget_minutes, args.smoke)
+        if args.run and args.seconds_per_game is None:
+            raise ValueError('--run requires measured --seconds-per-game and --budget-minutes.')
+        if args.run or args.smoke:
+            result = run_search(args.base, output, bounds, plan, args.seed,
+                                args.rows, args.cols, args.food)
+        else:
+            result = {'status': 'planned', 'plan': plan, 'bounds': bounds,
+                      'baseline': base, 'output_dir': str(output)}
+        print(json.dumps(result, indent=2, sort_keys=True, allow_nan=False))
+        return result
+    except (OSError, ValueError, TypeError) as error:
+        parser.error(str(error))
 
 
 if __name__ == '__main__':
