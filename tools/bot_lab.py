@@ -1,23 +1,24 @@
+from __future__ import annotations
+
 import argparse
 from collections import Counter
-from dataclasses import dataclass
+from dataclasses import dataclass, field, replace
 import json
 import random
 from pathlib import Path
 
-from analyze_matches import parse_log
-from bot_version import BOT_VERSION
-from bot_weights import load_active_weights, set_active_weights
-from food_planner import (
+from tools.analyze_matches import parse_log
+from snake_bot.bot_version import BOT_VERSION
+from snake_bot.bot_weights import load_active_weights, set_active_weights
+from snake_bot.food_planner import (
     center_control_score,
     classify_safety,
     edge_distance,
     position_control_penalty,
 )
-from snake_brain import SnakeBrain
-from snake_state import (
-    CRASH_PENALTY,
-    RIVAL_CRASH_REWARD,
+from snake_bot.snake_brain import SnakeBrain
+from snake_bot.game_rules import ELIMINATION_SCORE_THRESHOLD, MAX_MOVES
+from snake_bot.snake_state import (
     GameState,
     apply_move,
     cyclic_digit,
@@ -28,6 +29,18 @@ from snake_state import (
 
 
 DIRECTIONS = {'up', 'down', 'left', 'right'}
+V7_METRICS = tuple(
+    f'{metric}_{side}'
+    for side in ('A', 'B')
+    for metric in ('total_crashes', 'first_crashes', 'subsequent_crashes', 'unknown_crashes',
+                   'crashes_border', 'crashes_self', 'crashes_rival', 'crashes_wall',
+                   'lost_length', 'tail_generated_for', 'tail_collected',
+                   'tail_cleaned', 'tail_points', 'threshold_eliminations')
+)
+MECHANICS_VALIDATION_STATUS = {
+    'crash_and_tail': 'implemented according to official contract; pending live validation',
+    'wrong_number_growth': 'observed in real v7 snapshots',
+}
 
 
 @dataclass
@@ -51,6 +64,10 @@ class SimResult:
     no_legal_side: str | None
     edge_moves: int
     center_score_total: int
+    diagnostics: dict[str, int] = field(default_factory=dict)
+    termination_reason: str | None = None
+    move_budget: int = MAX_MOVES
+    remaining_moves: int | None = None
 
 
 def render_board(state):
@@ -65,6 +82,9 @@ def render_board(state):
             board[r][c] = '*'
     for r, c in state.pickups:
         board[r][c] = 'X'
+    for cells, symbol in ((state.tail_food_a, '\u24b6'), (state.tail_food_b, '\u24b7')):
+        for r, c in cells:
+            board[r][c] = symbol
     for side in ('A', 'B'):
         body = state.body(side)
         for index, (r, c) in enumerate(reversed(body)):
@@ -101,6 +121,7 @@ def spawn_food(state, rng, food_count, numbered=True, pickup_count=2):
         for r in range(state.rows)
         for c in range(state.cols)
         if (r, c) not in occupied and (r, c) not in food_values and (r, c) not in food and (r, c) not in pickups
+        and (r, c) not in state.tail_food_a and (r, c) not in state.tail_food_b
     ]
     rng.shuffle(empties)
     next_digit = state.next_food_digit or 1
@@ -140,6 +161,10 @@ def spawn_food(state, rng, food_count, numbered=True, pickup_count=2):
         multipliers=state.multipliers,
         walls=frozenset(walls),
         food_copy_targets=food_copy_targets,
+        tail_food_a=state.tail_food_a,
+        tail_food_b=state.tail_food_b,
+        crashed_a=state.crashed_a,
+        crashed_b=state.crashed_b,
     )
 
 
@@ -164,7 +189,13 @@ def spawn_wall(empties, rows, cols, rng):
     return frozenset(rng.choice(candidates)) if candidates else frozenset()
 
 
-def initial_state(seed, rows=15, cols=15, food_count=5, max_turns=300, numbered=True):
+def validate_move_budget(max_turns):
+    if not isinstance(max_turns, int) or not 0 <= max_turns <= MAX_MOVES:
+        raise ValueError(f'max_turns must be an integer from 0 to {MAX_MOVES}')
+
+
+def initial_state(seed, rows=15, cols=15, food_count=5, max_turns=MAX_MOVES, numbered=True):
+    validate_move_budget(max_turns)
     rng = random.Random(seed)
     middle = rows // 2
     snakes = {
@@ -185,15 +216,16 @@ def initial_state(seed, rows=15, cols=15, food_count=5, max_turns=300, numbered=
         next_food_digit=1 if numbered else None,
         multipliers={'A': 1, 'B': 1},
         food_copy_targets={},
+        crashed_a=False,
+        crashed_b=False,
     )
     return spawn_food(state, rng, food_count, numbered=numbered)
 
 
 def winner_for(state, dead_side=None):
-    if dead_side == 'A':
-        return 'B'
-    if dead_side == 'B':
-        return 'A'
+    # dead_side is retained for callers using the old signature, not v6 rules.
+    if state.is_terminal():
+        return state.terminal_winner()
     score_a = state.scores.get('A', 0)
     score_b = state.scores.get('B', 0)
     if score_a == score_b:
@@ -201,7 +233,75 @@ def winner_for(state, dead_side=None):
     return 'A' if score_a > score_b else 'B'
 
 
-def simulate_game(seed, max_turns=300, rows=None, cols=None, food_count=5, weights_by_side=None, candidate_side=None):
+def lab_transition(state, direction):
+    """Apply core rules once; diagnose the observed transition without respawns."""
+    if direction not in DIRECTIONS:
+        raise ValueError(f'Invalid direction: {direction!r}')
+    side, enemy = state.side, state.enemy
+    after = apply_move(state, direction, side)
+    events = Counter()
+    if not state.body(side):
+        return after, events
+    target = step(state.head(side), direction)
+    history = state.crashed_a if side == 'A' else state.crashed_b
+    after_history = after.crashed_a if side == 'A' else after.crashed_b
+    crashed = after.head(side) == state.head(side) and after_history is True
+    if crashed:
+        events[f'total_crashes_{side}'] += 1
+        kind = 'first' if history is False else 'subsequent' if history is True else 'unknown'
+        events[f'{kind}_crashes_{side}'] += 1
+        if not (0 <= target[0] < state.rows and 0 <= target[1] < state.cols):
+            cause = 'border'
+        elif target in state.walls:
+            cause = 'wall'
+        elif target in state.body(side):
+            cause = 'self'
+        else:
+            cause = 'rival'
+        events[f'crashes_{cause}_{side}'] += 1
+        events[f'lost_length_{side}'] += len(state.body(side)) - len(after.body(side))
+    else:
+        own_tail = state.tail_food_a if side == 'A' else state.tail_food_b
+        other_tail = state.tail_food_b if side == 'A' else state.tail_food_a
+        if target in own_tail:
+            events[f'tail_collected_{side}'] += 1
+            events[f'tail_points_{side}'] += after.scores[side] - state.scores[side]
+        elif target in state.food:
+            events[f'foods_{side}'] += 1
+        elif target in state.wrong_food():
+            events[f'wrong_digits_{side}'] += 1
+        if target in other_tail:
+            events[f'tail_cleaned_{side}'] += 1
+        if target in state.pickups:
+            events[f'pickups_{side}'] += 1
+    if target in state.walls:
+        events[f'wall_hits_{side}'] += 1
+    for beneficiary, before_cells, after_cells in (
+            ('A', state.tail_food_a, after.tail_food_a),
+            ('B', state.tail_food_b, after.tail_food_b)):
+        events[f'tail_generated_for_{beneficiary}'] += len(after_cells - before_cells)
+        if state.scores[beneficiary] >= ELIMINATION_SCORE_THRESHOLD > after.scores[beneficiary]:
+            events[f'threshold_eliminations_{beneficiary}'] += 1
+    return after, events
+
+
+def observe_simulation_state(brain, state, data):
+    """Supply known simulator history through the existing observer/cache API."""
+    game_id = str(data['game_id'])
+    history = {'A': state.crashed_a, 'B': state.crashed_b}
+    brain.crash_history[game_id] = dict(history)
+    brain.previous_snakes[game_id] = state.snakes
+    observed = brain.observe_state(data)
+    # The observer infers history from sparse server snapshots. Here the local
+    # transition is authoritative, including None on reconstructed scenarios.
+    observed = replace(observed, crashed_a=state.crashed_a, crashed_b=state.crashed_b)
+    brain.crash_history[game_id] = dict(history)
+    brain.observed_states[game_id] = observed
+    brain.current_states[game_id] = observed
+
+
+def simulate_game(seed, max_turns=MAX_MOVES, rows=None, cols=None, food_count=5, weights_by_side=None, candidate_side=None):
+    validate_move_budget(max_turns)
     rng = random.Random(seed)
     rows = rows or rng.randint(12, 20)
     cols = cols or rng.randint(12, 20)
@@ -209,79 +309,47 @@ def simulate_game(seed, max_turns=300, rows=None, cols=None, food_count=5, weigh
     brains = {'A': SnakeBrain(enable_debug=False), 'B': SnakeBrain(enable_debug=False)}
     metrics = Counter()
     game_id = f'sim_{seed}'
+    turns = 0
 
     for turn_index in range(max_turns):
+        if state.is_terminal():
+            break
         side = state.side
         if weights_by_side and side in weights_by_side:
             set_active_weights(weights_by_side[side])
-        legal = legal_moves(state, side)
-        if not legal:
-            enemy = state.enemy
-            final_scores = dict(state.scores)
-            final_scores[side] = final_scores.get(side, 0) + CRASH_PENALTY
-            final_scores[enemy] = final_scores.get(enemy, 0) + RIVAL_CRASH_REWARD
-            if final_scores.get('A', 0) == final_scores.get('B', 0):
-                winner = None
-            else:
-                winner = 'A' if final_scores.get('A', 0) > final_scores.get('B', 0) else 'B'
-            return SimResult(
-                seed=seed,
-                candidate_side=candidate_side,
-                winner=winner,
-                turns=turn_index,
-                score_a=final_scores.get('A', 0),
-                score_b=final_scores.get('B', 0),
-                foods_a=metrics['foods_A'],
-                foods_b=metrics['foods_B'],
-                pickups_a=metrics['pickups_A'],
-                pickups_b=metrics['pickups_B'],
-                wrong_digits_a=metrics['wrong_digits_A'],
-                wrong_digits_b=metrics['wrong_digits_B'],
-                wall_hits_a=metrics['wall_hits_A'],
-                wall_hits_b=metrics['wall_hits_B'],
-                control_moves_a=metrics['control_moves_A'],
-                control_moves_b=metrics['control_moves_B'],
-                no_legal_side=side,
-                edge_moves=metrics['edge_moves'],
-                center_score_total=metrics['center_score_total'],
-            )
-
         data = make_turn_data(state, game_id, turn_index)
         brain = brains[side]
+        observe_simulation_state(brain, state, data)
         direction = brain.choose_move(data)
-        direction = brain.safe_direction(data, direction)
+        if direction not in DIRECTIONS:
+            raise ValueError(f'Invalid direction: {direction!r}')
         debug = brain.decision_debug(game_id) or {}
         if debug.get('reason') == 'advantage_control':
             metrics[f'control_moves_{side}'] += 1
-        if direction not in legal:
-            direction = legal[0]
         if position_control_penalty(state, side, direction) > 0:
             metrics['edge_moves'] += 1
 
-        target = step(state.head(side), direction)
-        ate = target in state.food
-        took_pickup = target in state.pickups
-        ate_wrong_digit = target in state.wrong_food()
-        hit_wall = target in state.walls
-        state = apply_move(state, direction, side)
-        if ate:
-            metrics[f'foods_{side}'] += 1
-        if took_pickup:
-            metrics[f'pickups_{side}'] += 1
-        if ate_wrong_digit:
-            metrics[f'wrong_digits_{side}'] += 1
-        if hit_wall:
-            metrics[f'wall_hits_{side}'] += 1
+        state, events = lab_transition(state, direction)
+        metrics.update(events)
+        turns += 1
         head = state.head(side)
         metrics['center_score_total'] += center_control_score(state, head)
         brain.commit_move(data, direction)
+        if state.is_terminal():
+            break
         state = spawn_food(state, rng, food_count)
 
+    if any(score < ELIMINATION_SCORE_THRESHOLD for score in state.scores.values()):
+        termination_reason = 'score_elimination'
+    elif turns == max_turns and max_turns < MAX_MOVES:
+        termination_reason = 'simulation_budget'
+    else:
+        termination_reason = 'movement_limit'
     return SimResult(
         seed=seed,
         candidate_side=candidate_side,
-        winner=winner_for(state),
-        turns=max_turns,
+        winner=state.terminal_winner() if state.is_terminal() else winner_for(state),
+        turns=turns,
         score_a=state.scores.get('A', 0),
         score_b=state.scores.get('B', 0),
         foods_a=metrics['foods_A'],
@@ -297,6 +365,10 @@ def simulate_game(seed, max_turns=300, rows=None, cols=None, food_count=5, weigh
         no_legal_side=None,
         edge_moves=metrics['edge_moves'],
         center_score_total=metrics['center_score_total'],
+        diagnostics=dict(metrics),
+        termination_reason=termination_reason,
+        move_budget=max_turns,
+        remaining_moves=state.remaining_moves,
     )
 
 
@@ -352,7 +424,7 @@ def summarize_simulations(results):
         for result in candidate_results
         if result.no_legal_side in ('A', 'B') and result.no_legal_side != result.candidate_side
     )
-    return {
+    summary = {
         'bot_version': BOT_VERSION,
         'games': games,
         'avg_turns': round(total_turns / games, 2) if games else 0,
@@ -395,6 +467,12 @@ def summarize_simulations(results):
         'candidate_control_moves': candidate_control_moves,
         'opponent_control_moves': opponent_control_moves,
     }
+    summary.update({key: sum(result.diagnostics.get(key, 0) for result in results)
+                    for key in V7_METRICS})
+    summary['termination_reasons'] = dict(Counter(result.termination_reason or 'unspecified' for result in results))
+    summary['move_budgets'] = dict(Counter(result.move_budget for result in results))
+    summary['mechanics_validation_status'] = dict(MECHANICS_VALIDATION_STATUS)
+    return summary
 
 
 def iter_log_entries(paths):
@@ -485,7 +563,7 @@ def main():
     sim = sub.add_parser('simulate', help='run deterministic self-play simulations')
     sim.add_argument('--games', type=int, default=50)
     sim.add_argument('--seed', type=int, default=1)
-    sim.add_argument('--turns', type=int, default=300)
+    sim.add_argument('--turns', type=int, default=MAX_MOVES)
     sim.add_argument('--rows', type=int, default=0, help='0 chooses a random size from 12 to 20')
     sim.add_argument('--cols', type=int, default=0, help='0 chooses a random size from 12 to 20')
     sim.add_argument('--food', type=int, default=5)
@@ -521,6 +599,10 @@ def main():
             print(f"food_per_100_turns: {summary['food_per_100_turns']}")
             print(f"edge_moves_per_100_turns: {summary['edge_moves_per_100_turns']}")
             print(f"avg_center_score: {summary['avg_center_score']}")
+            for key in V7_METRICS:
+                print(f'{key}: {summary[key]}')
+            for key in ('termination_reasons', 'move_budgets', 'mechanics_validation_status'):
+                print(f'{key}: {summary[key]}')
     elif args.command == 'logs':
         summary = evaluate_log_decisions(expand_log_paths(args.paths), args.max_positions or None)
         if args.json:

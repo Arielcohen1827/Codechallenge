@@ -5,10 +5,12 @@ agregar mecanicas, y todas las anteriores deben seguir funcionando.
 
 ## Responsabilidades
 
-- `snake_state.py`: reglas, estado del juego y transiciones.
-- `snake_brain.py`: coordinacion de la decision.
-- `food_planner.py`: planificacion y heuristicas.
-- `move_search.py` y `search_engine.py`: busqueda tactica y profunda.
+- `snake_bot/snake_state.py`: reglas, estado del juego y transiciones.
+- `snake_bot/snake_brain.py`: coordinacion de la decision.
+- `snake_bot/food_planner.py`: planificacion y heuristicas.
+- `snake_bot/move_search.py` y `snake_bot/search_engine.py`: busqueda tactica y profunda.
+- `tools/`: laboratorio, analisis, benchmark, optimizador y servidor del viewer.
+- `tests/`: tests de comportamiento; descubrimiento desde la raiz.
 
 ## Reglas de trabajo
 
@@ -20,7 +22,7 @@ agregar mecanicas, y todas las anteriores deben seguir funcionando.
   reglas anteriores, testear tambien esas combinaciones y casos limite.
 - No agregar heuristicas solo porque parezcan buenas. Definir la hipotesis
   y comparar el cambio contra una linea base con tests, logs reales,
-  `bot_lab.py` y, cuando corresponda, `optimize_weights.py`.
+  `tools/bot_lab.py` y, cuando corresponda, `tools/optimize_weights.py`.
 - Para comparar estrategias, usar las mismas semillas, escenarios y limites;
   registrar resultados de ambos lados, metricas y posibles regresiones.
   Cambiar una cosa medible por vez y comunicar si la evidencia no alcanza.

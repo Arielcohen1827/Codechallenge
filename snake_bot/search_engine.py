@@ -1,13 +1,16 @@
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from time import perf_counter
+from typing import Optional
+from snake_bot.game_rules import (
+    food_points, score_after_crash, tail_food_reward,
+    CRASH_KEEP_LENGTH, ELIMINATION_SCORE_THRESHOLD,
+)
 
-from snake_state import (
-    CRASH_PENALTY,
+from snake_bot.snake_state import (
     DIRS,
     FOOD_SCORE,
     MULTIPLIER_PICKUP_SCORE,
     NORMAL_SCORE,
-    RIVAL_CRASH_REWARD,
     WALL_HIT_PENALTY,
     WRONG_FOOD_PENALTY,
     cyclic_digit,
@@ -36,6 +39,23 @@ class CompactState:
     multipliers: tuple[int, int]
     remaining_moves: int
     reliable_tails: tuple[bool, bool]
+    tail_food_a: tuple[int, ...] = ()
+    tail_food_b: tuple[int, ...] = ()
+    crashed_a: Optional[bool] = None
+    crashed_b: Optional[bool] = None
+
+    def terminal_winner(self):
+        for side, score in enumerate(self.scores):
+            if score < ELIMINATION_SCORE_THRESHOLD:
+                return 'B' if side == 0 else 'A'
+        if self.remaining_moves <= 0:
+            a, b = self.scores
+            return 'A' if a > b else 'B' if b > a else None
+        return None
+
+    def is_terminal(self):
+        return self.remaining_moves <= 0 or any(
+            score < ELIMINATION_SCORE_THRESHOLD for score in self.scores)
 
 
 @dataclass(frozen=True, slots=True)
@@ -87,6 +107,10 @@ class IterativeSearchEngine:
             multipliers=(state.multipliers.get('A', 1), state.multipliers.get('B', 1)),
             remaining_moves=state.remaining_moves,
             reliable_tails=('A' in state.reliable_tails, 'B' in state.reliable_tails),
+            tail_food_a=tuple(sorted(engine.index(cell) for cell in state.tail_food_a)),
+            tail_food_b=tuple(sorted(engine.index(cell) for cell in state.tail_food_b)),
+            crashed_a=state.crashed_a,
+            crashed_b=state.crashed_b,
         )
         return engine, compact
 
@@ -110,8 +134,9 @@ class IterativeSearchEngine:
             try:
                 for direction in ordered:
                     self.check_deadline()
-                    after = self.apply_move(state, direction)
-                    current[direction] = self.alphabeta(after, depth - 1, -INF, INF)
+                    current[direction] = min(
+                        self.alphabeta(after, depth - 1, -INF, INF)
+                        for after in self.move_outcomes(state, direction))
             except SearchTimeout:
                 break
             best_scores = current
@@ -135,12 +160,9 @@ class IterativeSearchEngine:
         if (self.nodes & 31) == 0:
             self.check_deadline()
 
-        suicide_value = self.winning_suicide_value(state)
-        if suicide_value is not None:
-            return suicide_value
-        if state.remaining_moves <= 0:
-            return self.final_score_value(state)
-        moves = self.legal_moves(state)
+        if state.is_terminal():
+            return self.terminal_value(state)
+        moves = self.available_moves(state)
         if not moves:
             return self.terminal_value(state)
         if depth <= 0:
@@ -156,8 +178,10 @@ class IterativeSearchEngine:
         value = -INF if maximizing else INF
         cutoff = False
         for direction in self.ordered_moves(state, moves):
-            child = self.apply_move(state, direction)
-            score = self.alphabeta(child, depth - 1, alpha, beta)
+            # Unknown first-crash history is an observation uncertainty, not
+            # a selectable move. Use the worst official outcome for the root.
+            score = min(self.alphabeta(child, depth - 1, alpha, beta)
+                        for child in self.move_outcomes(state, direction))
             if maximizing:
                 value = max(value, score)
                 alpha = max(alpha, value)
@@ -199,7 +223,7 @@ class IterativeSearchEngine:
             return ()
         occupied = self.occupied_mask(state)
         walls = self.mask(state.walls)
-        food = set(state.food)
+        food = set(state.food) | set(state.tail_food_a if state.side == 0 else state.tail_food_b)
         moves = []
         for direction in DIRS:
             target = self.target_index(body[0], direction)
@@ -217,39 +241,61 @@ class IterativeSearchEngine:
         return tuple(moves)
 
     def winning_suicide_value(self, state):
-        side = state.side
-        enemy = 1 - side
-        if state.scores[side] + CRASH_PENALTY <= state.scores[enemy] + RIVAL_CRASH_REWARD:
-            return None
-        body = state.bodies[side]
-        if not body:
-            return None
-        occupied = set(state.bodies[0]) | set(state.bodies[1])
-        walls = set(state.walls)
-        for direction in DIRS:
-            target = self.target_index(body[0], direction)
-            if target is None:
-                break
-            if target in walls:
-                continue
-            if target in occupied:
-                if len(body) > 1 and target == body[1]:
-                    break
-                if target == body[-1] and state.reliable_tails[side]:
-                    continue
-                break
-        else:
-            return None
-        scores = list(state.scores)
-        scores[side] += CRASH_PENALTY
-        scores[enemy] += RIVAL_CRASH_REWARD
-        difference = scores[self.root_side] - scores[1 - self.root_side]
-        return 500_000_000 + difference if difference > 0 else -500_000_000 + difference
+        """Compatibility: a score lead never makes an ordinary crash final."""
+        return None
+
+    def available_moves(self, state):
+        if state.is_terminal() or not state.bodies[state.side]:
+            return ()
+        moves = self.legal_moves(state)
+        if moves:
+            return moves
+        body = state.bodies[state.side]
+        return tuple(direction for direction in DIRS
+                     if len(body) < 2 or self.target_index(body[0], direction) != body[1])
+
+    def move_outcomes(self, state, direction):
+        history = state.crashed_a if state.side == 0 else state.crashed_b
+        if history is not None or state.scores[state.side] <= 0:
+            return (self.apply_move(state, direction),)
+        field = 'crashed_a' if state.side == 0 else 'crashed_b'
+        first = self.apply_move(replace(state, **{field: False}), direction)
+        if getattr(first, field) is True:
+            repeated = self.apply_move(replace(state, **{field: True}), direction)
+            return (first, repeated)
+        return (replace(first, **{field: None}),)
 
     def apply_move(self, state, direction):
+        if state.is_terminal():
+            raise ValueError('Cannot move after the game has ended')
         side = state.side
         body = state.bodies[side]
+        if not body:
+            return state
         target = self.target_index(body[0], direction)
+        tail_food = state.tail_food_a if side == 0 else state.tail_food_b
+        grows = target in state.food or any(cell == target for cell, _ in state.food_values) or target in tail_food
+        blocked = set(state.walls) | set(state.bodies[0]) | set(state.bodies[1])
+        if not grows:
+            blocked.discard(body[-1])
+        crashes = target is None or target in blocked or (len(body) > 1 and target == body[1])
+        if crashes:
+            scores = list(state.scores)
+            scores[side] = score_after_crash(scores[side],
+                                             state.crashed_a if side == 0 else state.crashed_b)
+            bodies = list(state.bodies)
+            bodies[side] = body[:CRASH_KEEP_LENGTH]
+            detached = set(body[CRASH_KEEP_LENGTH:])
+            reliable = list(state.reliable_tails)
+            reliable[side] = True
+            return replace(
+                state, side=1 - side, bodies=tuple(bodies), scores=tuple(scores),
+                remaining_moves=max(0, state.remaining_moves - 1), reliable_tails=tuple(reliable),
+                walls=self.shrink_wall(state.walls) if side == 1 else state.walls,
+                tail_food_a=tuple(sorted(set(state.tail_food_a) | (detached if side == 1 else set()))),
+                tail_food_b=tuple(sorted(set(state.tail_food_b) | (detached if side == 0 else set()))),
+                crashed_a=True if side == 0 else state.crashed_a,
+                crashed_b=True if side == 1 else state.crashed_b)
         walls = state.walls
         hits_wall = target in walls
         eats = target in state.food
@@ -259,7 +305,7 @@ class IterativeSearchEngine:
 
         if hits_wall:
             new_body = body
-        elif eats:
+        elif grows:
             new_body = (target,) + body
         else:
             new_body = (target,) + body[:-1]
@@ -270,9 +316,11 @@ class IterativeSearchEngine:
         multipliers = list(state.multipliers)
         if hits_wall:
             move_score = WALL_HIT_PENALTY
+        elif target in tail_food:
+            move_score = tail_food_reward(multipliers[side])
         elif eats:
             digit = food_values.get(target, 1)
-            move_score = digit * FOOD_SCORE * max(1, multipliers[side])
+            move_score = food_points(digit, multipliers[side])
         elif wrong_food:
             move_score = WRONG_FOOD_PENALTY
         elif takes_pickup:
@@ -321,6 +369,10 @@ class IterativeSearchEngine:
             multipliers=(multipliers[0], multipliers[1]),
             remaining_moves=max(0, state.remaining_moves - 1),
             reliable_tails=(reliable[0], reliable[1]),
+            tail_food_a=tuple(cell for cell in state.tail_food_a if cell != target),
+            tail_food_b=tuple(cell for cell in state.tail_food_b if cell != target),
+            crashed_a=state.crashed_a,
+            crashed_b=state.crashed_b,
         )
 
     def shrink_wall(self, walls):
@@ -337,7 +389,7 @@ class IterativeSearchEngine:
         return tuple(ordered[1:-1])
 
     def ordered_moves(self, state, moves=None):
-        moves = moves or self.legal_moves(state)
+        moves = self.available_moves(state) if moves is None else moves
         body = state.bodies[state.side]
         food_values = dict(state.food_values)
         food = set(state.food)
@@ -348,6 +400,8 @@ class IterativeSearchEngine:
 
         def key(direction):
             target = self.target_index(body[0], direction)
+            if target is None:
+                return (0, 0, 0, -self.size * 100)
             penalty = target in walls or (target in food_values and target not in food)
             reward = 0
             if target in food:
@@ -365,17 +419,14 @@ class IterativeSearchEngine:
         return sorted(moves, key=key, reverse=True)
 
     def terminal_value(self, state):
-        scores = list(state.scores)
-        dead = state.side
-        enemy = 1 - dead
-        scores[dead] += CRASH_PENALTY
-        scores[enemy] += RIVAL_CRASH_REWARD
-        difference = scores[self.root_side] - scores[1 - self.root_side]
-        if difference > 0:
-            return 500_000_000 + difference
-        if difference < 0:
-            return -500_000_000 + difference
-        return 0
+        if not state.is_terminal():
+            return self.evaluate(state)
+        if any(score < ELIMINATION_SCORE_THRESHOLD for score in state.scores):
+            winner = state.terminal_winner()
+            root = 'A' if self.root_side == 0 else 'B'
+            delta = state.scores[self.root_side] - state.scores[1 - self.root_side]
+            return (500_000_000 if winner == root else -500_000_000) + delta
+        return self.final_score_value(state)
 
     def final_score_value(self, state):
         difference = state.scores[self.root_side] - state.scores[1 - self.root_side]
@@ -429,7 +480,7 @@ class IterativeSearchEngine:
                 ordered.append(digit)
         turns_left = max(0, (state.remaining_moves + (1 if side == state.side else 0)) // 2)
         captures = min(len(ordered), max(1, turns_left // 8))
-        return sum(digit * FOOD_SCORE for digit in ordered[:captures])
+        return sum(food_points(digit) for digit in ordered[:captures])
 
     def productive_moves_for(self, state, side):
         moves = self.legal_moves_for(state, side)
@@ -462,6 +513,10 @@ class IterativeSearchEngine:
             multipliers=state.multipliers,
             remaining_moves=state.remaining_moves,
             reliable_tails=state.reliable_tails,
+            tail_food_a=state.tail_food_a,
+            tail_food_b=state.tail_food_b,
+            crashed_a=state.crashed_a,
+            crashed_b=state.crashed_b,
         )
         return self.legal_moves(swapped)
 

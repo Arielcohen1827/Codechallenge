@@ -11,5 +11,5 @@ if errorlevel 1 exit /b %errorlevel%
 "%PYTHON%" -m coverage run -m unittest discover -v
 if errorlevel 1 exit /b %errorlevel%
 
-"%PYTHON%" -m coverage report
+"%PYTHON%" -m coverage report --fail-under=90
 exit /b %errorlevel%

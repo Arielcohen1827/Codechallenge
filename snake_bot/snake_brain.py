@@ -1,8 +1,11 @@
 from collections import Counter, deque
+from dataclasses import replace
 
-from bot_weights import get_weights
-from food_planner import (
+from snake_bot.bot_weights import get_weights
+from snake_bot.game_rules import CRASH_KEEP_LENGTH, CRASH_PENALTY, MAX_MOVES
+from snake_bot.food_planner import (
     advantage_control_move,
+    apply_move as simulated_move,
     build_food_plans,
     classify_safety,
     choose_food_plan,
@@ -18,12 +21,13 @@ from food_planner import (
     should_commit_to_food,
     should_use_plan_for_positioning,
     sequence_gate_hold_move,
-    winning_suicide_move,
 )
-from move_search import TurnSearchCache, rank_deep_moves
-from snake_state import (
+from snake_bot.move_search import TurnSearchCache, rank_deep_moves
+from snake_bot.snake_state import (
     FOOD_SCORE,
+    DIRS,
     apply_move,
+    available_moves,
     legal_moves,
     manhattan,
     parse_state,
@@ -42,28 +46,110 @@ class SnakeBrain:
         self.previous_snakes = {}
         self.current_states = {}
         self.last_decisions = {}
+        self.crash_history = {}
+        self.observed_states = {}
+        self.pending_moves = {}
+        self.observation_tokens = {}
+
+    def observe_state(self, data):
+        """Reconcile server snapshots; predictions never become confirmed history."""
+        game_id = str(data.get('game_id', 'default'))
+        previous = self.observed_states.get(game_id)
+        history = dict(self.crash_history.get(game_id, {'A': None, 'B': None}))
+        state = parse_state(data, self.previous_snakes.get(game_id), history)
+        if (previous is not None and data.get('remaining_moves') is not None
+                and state.remaining_moves > previous.remaining_moves):
+            return None
+        token = (data.get('turn_token'), state.remaining_moves)
+        duplicate = previous is not None and self.observation_tokens.get(game_id) == token
+        if duplicate:
+            if (state.board == previous.board and state.scores == previous.scores
+                    and state.multipliers == previous.multipliers and state.side == previous.side):
+                self.current_states[game_id] = previous
+                return previous
+            state = parse_state(data, previous.snakes, history)
+            for side in ('A', 'B'):
+                if history[side] is False and (
+                        state.body(side) != previous.body(side)
+                        or state.scores[side] != previous.scores[side]
+                        or state.multipliers[side] != previous.multipliers[side]):
+                    history[side] = None
+        if previous is None:
+            # Only an explicit initial horizon proves nobody has taken a turn.
+            if data.get('remaining_moves') is not None:
+                if state.remaining_moves == MAX_MOVES and state.side == 'A':
+                    history = {'A': False, 'B': False}
+                elif state.remaining_moves == MAX_MOVES - 1 and state.side == 'B':
+                    history['B'] = False
+        elif not duplicate:
+            delta = previous.remaining_moves - state.remaining_moves
+            contiguous = delta == 2 and previous.side == state.side
+            if not contiguous:
+                history = {side: True if value is True else None
+                           for side, value in history.items()}
+            else:
+                for side in ('A', 'B'):
+                    before, after = previous.body(side), state.body(side)
+                    if not before or not after:
+                        if history[side] is False:
+                            history[side] = None
+                        continue
+                    prefix = before[:CRASH_KEEP_LENGTH]
+                    fixed_prefix = (before[0] == after[0]
+                                    and set(after) == set(prefix)
+                                    and len(after) == len(prefix))
+                    old_score, score = previous.scores[side], state.scores[side]
+                    crash_scores = ({0, old_score - CRASH_PENALTY} if old_score > 0
+                                    else {old_score - CRASH_PENALTY})
+                    if fixed_prefix and score in crash_scores:
+                        history[side] = True
+                        snakes = dict(state.snakes)
+                        snakes[side] = prefix
+                        state = replace(state, snakes=snakes,
+                                        reliable_tails=state.reliable_tails | {side})
+                    elif history[side] is False:
+                        normal = (manhattan(before[0], after[0]) == 1
+                                  and ((len(after) == len(before)
+                                        and set(after) == set((after[0],) + before[:-1]))
+                                       or (len(after) == len(before) + 1
+                                           and set(after) == set((after[0],) + before))))
+                        pending = self.pending_moves.get(game_id)
+                        if pending and side == previous.side:
+                            normal = normal and after[0] == step(before[0], pending[1])
+                        if not normal:
+                            history[side] = None
+            if delta > 2:
+                for side in ('A', 'B'):
+                    if len(state.body(side)) < len(previous.body(side)) and state.body(side):
+                        history[side] = True
+            self.pending_moves.pop(game_id, None)
+        if state.tail_food_b:
+            history['A'] = True
+        if state.tail_food_a:
+            history['B'] = True
+        state = replace(state, crashed_a=history['A'], crashed_b=history['B'])
+        self.crash_history[game_id] = history
+        self.observed_states[game_id] = state
+        self.observation_tokens[game_id] = token
+        self.current_states[game_id] = state
+        self.previous_snakes[game_id] = state.snakes
+        return state
 
     def choose_move(self, data):
         game_id = str(data.get('game_id', 'default'))
-        state = parse_state(data, self.previous_snakes.get(game_id))
+        state = self.observe_state(data)
+        if state is None:
+            return None
         self.current_states[game_id] = state
         side = state.side
         self._update_food_clock(game_id, side, state)
 
         legal = legal_moves(state, side)
         debug = self._base_debug(data, state, legal)
-        suicide = winning_suicide_move(state, side)
-        if suicide:
-            debug['terminal_scores'] = {
-                side: state.scores.get(side, 0) - 500,
-                state.enemy: state.scores.get(state.enemy, 0) + 1000,
-            }
-            self._save_debug(game_id, debug, 'winning_suicide', suicide)
-            self._remember(game_id, state)
-            return suicide
         if not legal:
-            self._save_debug(game_id, debug, 'no_legal_moves', 'up')
-            return 'up'
+            move = next(iter(available_moves(state, side)), 'up')
+            self._save_debug(game_id, debug, 'no_safe_moves', move)
+            return move
 
         kill = forced_kill_move(state, side, legal)
         if kill:
@@ -328,28 +414,37 @@ class SnakeBrain:
         game_id = str(data.get('game_id', 'default'))
         state = self.current_states.get(game_id)
         if state is None:
-            state = parse_state(data, self.previous_snakes.get(game_id))
+            state = self.observe_state(data)
             self.current_states[game_id] = state
         legal = legal_moves(state, state.side)
-        if direction == winning_suicide_move(state, state.side):
-            return direction
         if direction in legal:
             return direction
         if legal:
             safe = fallback_food_positioning(state, state.side, legal, None, 0, 0)
             self._mark_safe_repair(game_id, direction, safe)
             return safe
-        self._mark_safe_repair(game_id, direction, 'up')
-        return 'up'
+        fallback = next(iter(available_moves(state, state.side)), 'up')
+        self._mark_safe_repair(game_id, direction, fallback)
+        return fallback
 
     def commit_move(self, data, direction):
         game_id = str(data.get('game_id', 'default'))
         state = self.current_states.get(game_id)
         if state is None:
-            state = parse_state(data, self.previous_snakes.get(game_id))
-        if direction in legal_moves(state, state.side):
-            state = apply_move(state, direction, state.side)
-        self.previous_snakes[game_id] = state.snakes
+            state = self.observe_state(data)
+        if direction in DIRS and not state.is_terminal():
+            self.pending_moves[game_id] = (state, direction)
+            try:
+                predicted = apply_move(state, direction, state.side)
+                snakes = predicted.snakes
+            except ValueError:
+                unknown = state.crashed_a if state.side == 'A' else state.crashed_b
+                if unknown is not None or state.scores[state.side] <= 0:
+                    raise
+                # Unknown positive-score crash: predict geometry, never economics.
+                snakes = dict(state.snakes)
+                snakes[state.side] = state.body(state.side)[:CRASH_KEEP_LENGTH]
+            self.previous_snakes[game_id] = snakes
         self.current_states.pop(game_id, None)
 
     def forget(self, game_id):
@@ -363,6 +458,10 @@ class SnakeBrain:
         self.previous_snakes.pop(str(game_id), None)
         self.current_states.pop(str(game_id), None)
         self.last_decisions.pop(str(game_id), None)
+        self.crash_history.pop(str(game_id), None)
+        self.observed_states.pop(str(game_id), None)
+        self.pending_moves.pop(str(game_id), None)
+        self.observation_tokens.pop(str(game_id), None)
 
     def decision_debug(self, game_id):
         return self.last_decisions.get(str(game_id))
@@ -387,6 +486,9 @@ class SnakeBrain:
             tuple(sorted(state.pickups)),
             tuple(sorted(state.multipliers.items())),
             tuple(sorted(state.walls)),
+            tuple(sorted(state.scores.items())),
+            state.crashed_a, state.crashed_b,
+            tuple(sorted(state.tail_food_a)), tuple(sorted(state.tail_food_b)),
             self.targets.get((game_id, state.side)),
         )
         self.recent_states.setdefault(game_id, deque(maxlen=80)).append(key)
@@ -400,6 +502,9 @@ class SnakeBrain:
             tuple(sorted(state.pickups)),
             tuple(sorted(state.multipliers.items())),
             tuple(sorted(state.walls)),
+            tuple(sorted(state.scores.items())),
+            state.crashed_a, state.crashed_b,
+            tuple(sorted(state.tail_food_a)), tuple(sorted(state.tail_food_b)),
             self.targets.get((game_id, state.side)),
         )
         return sum(1 for item in self.recent_states.get(game_id, ()) if item == key)
@@ -424,6 +529,9 @@ class SnakeBrain:
             'pickups': sorted(state.pickups),
             'walls': sorted(state.walls),
             'multipliers': state.multipliers,
+            'crash_history': {'A': state.crashed_a, 'B': state.crashed_b},
+            'tail_food_a': sorted(state.tail_food_a),
+            'tail_food_b': sorted(state.tail_food_b),
             'legal': legal,
             'scores': state.scores,
             'remaining_moves': state.remaining_moves,
@@ -479,7 +587,7 @@ class SnakeBrain:
         deep_by_direction = {item['direction']: item for item in deep_moves}
         candidates = []
         for direction in legal:
-            after = apply_move(state, direction, side)
+            after = simulated_move(state, direction, side)
             head = after.head(side)
             analysis = deep_by_direction.get(direction, {})
             nearest_food = (
@@ -516,10 +624,8 @@ class SnakeBrain:
 def final_safe_direction(data, direction):
     state = parse_state(data)
     legal = legal_moves(state, state.side)
-    if direction == winning_suicide_move(state, state.side):
-        return direction
     if direction in legal:
         return direction
     if legal:
         return fallback_food_positioning(state, state.side, legal, None, 0, 0)
-    return 'up'
+    return next(iter(available_moves(state, state.side)), 'up')

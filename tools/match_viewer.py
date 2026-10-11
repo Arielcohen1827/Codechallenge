@@ -5,7 +5,7 @@ from pathlib import Path
 from urllib.parse import unquote, urlparse
 
 
-ROOT = Path(__file__).resolve().parent
+ROOT = Path(__file__).resolve().parent.parent
 VIEWER_DIR = ROOT / 'viewer'
 LIVE_DIR = ROOT / 'games' / 'live'
 INITIAL_SNAKE_LENGTH = 3

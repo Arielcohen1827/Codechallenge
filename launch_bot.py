@@ -86,7 +86,7 @@ def viewer_healthy():
 def start_viewer():
     if not viewer_healthy():
         subprocess.Popen(
-            [sys.executable, str(ROOT / 'match_viewer.py')], cwd=ROOT,
+            [sys.executable, '-m', 'tools.match_viewer'], cwd=ROOT,
             creationflags=subprocess.CREATE_NO_WINDOW if os.name == 'nt' else 0,
             stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
         )

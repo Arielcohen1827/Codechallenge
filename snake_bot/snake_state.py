@@ -1,5 +1,22 @@
+from __future__ import annotations
+
 from collections import deque
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
+from snake_bot.game_rules import (
+    CRASH_PENALTY,
+    CRASH_KEEP_LENGTH,
+    ELIMINATION_SCORE_THRESHOLD,
+    MAX_MOVES,
+    FOOD_SCORE,
+    MULTIPLIER_PICKUP_SCORE,
+    RIVAL_CRASH_REWARD,
+    WRONG_FOOD_PENALTY,
+    cyclic_digit,
+    find_next_food_digit,
+    food_points,
+    score_after_crash,
+    tail_food_reward,
+)
 
 
 DIRS = {
@@ -9,13 +26,8 @@ DIRS = {
     'right': (0, 1),
 }
 
-FOOD_SCORE = 100
 NORMAL_SCORE = 1
-WRONG_FOOD_PENALTY = -500
-MULTIPLIER_PICKUP_SCORE = 50
 WALL_HIT_PENALTY = -500
-CRASH_PENALTY = -500
-RIVAL_CRASH_REWARD = 1000
 NEVER_RELEASE = 10_000
 
 
@@ -37,6 +49,23 @@ class GameState:
     multipliers: dict[str, int] = field(default_factory=lambda: {'A': 1, 'B': 1})
     walls: frozenset[tuple[int, int]] = frozenset()
     food_copy_targets: dict[int, int] = field(default_factory=dict)
+    tail_food_a: frozenset[tuple[int, int]] = frozenset()
+    tail_food_b: frozenset[tuple[int, int]] = frozenset()
+    crashed_a: bool | None = None
+    crashed_b: bool | None = None
+
+    def terminal_winner(self):
+        for side in ('A', 'B'):
+            if self.scores.get(side, 0) < ELIMINATION_SCORE_THRESHOLD:
+                return 'B' if side == 'A' else 'A'
+        if self.remaining_moves <= 0:
+            a, b = self.scores.get('A', 0), self.scores.get('B', 0)
+            return 'A' if a > b else 'B' if b > a else None
+        return None
+
+    def is_terminal(self):
+        return self.remaining_moves <= 0 or any(
+            score < ELIMINATION_SCORE_THRESHOLD for score in self.scores.values())
 
     def head(self, side):
         snake = self.snakes.get(side, ())
@@ -59,8 +88,7 @@ class GameState:
 
     def food_reward(self, side, pos):
         digit = self.food_values.get(pos)
-        base = FOOD_SCORE if digit is None else digit * FOOD_SCORE
-        return base * max(1, self.multipliers.get(side, 1))
+        return food_points(digit, self.multipliers.get(side, 1))
 
     def numbered_sequence(self, limit=5):
         if self.next_food_digit is None or not self.food_values:
@@ -112,7 +140,8 @@ def parse_board(board_text, rows=None, cols=None):
     return board, rows, cols
 
 
-def parse_state(data, previous_snakes=None):
+def parse_state(data, previous_snakes=None, crash_history=None):
+    """Parse a snapshot; crash_history is caller-owned, not inferred from scores."""
     raw_rows = data.get('rows')
     raw_cols = data.get('cols')
     if (raw_rows is None or raw_cols is None) and data.get('board_size'):
@@ -183,7 +212,7 @@ def parse_state(data, previous_snakes=None):
         snakes=snakes,
         food=food,
         scores=scores,
-        remaining_moves=int(data.get('remaining_moves', 0) or 0),
+        remaining_moves=int(data.get('remaining_moves', MAX_MOVES) or 0),
         reliable_tails=frozenset(reliable),
         food_values=food_values,
         next_food_digit=next_food_digit,
@@ -194,21 +223,13 @@ def parse_state(data, previous_snakes=None):
         },
         walls=walls,
         food_copy_targets=food_copy_targets,
+        tail_food_a=frozenset((r, c) for r, row in enumerate(board)
+                              for c, ch in enumerate(row) if ch == '\u24b6'),
+        tail_food_b=frozenset((r, c) for r, row in enumerate(board)
+                              for c, ch in enumerate(row) if ch == '\u24b7'),
+        crashed_a=(crash_history or {}).get('A'),
+        crashed_b=(crash_history or {}).get('B'),
     )
-
-
-def cyclic_digit(value, offset=1):
-    return ((int(value) - 1 + offset) % 9) + 1
-
-
-def find_next_food_digit(values):
-    present = {int(value) for value in values}
-    if not present:
-        return None
-    candidates = [digit for digit in present if cyclic_digit(digit, -1) not in present]
-    if len(candidates) == 1:
-        return candidates[0]
-    return min(candidates or present)
 
 
 def normalize_side(raw_side, board):
@@ -270,6 +291,10 @@ def track_snake(previous, board, side):
     # Its own already-committed body is therefore often unchanged verbatim.
     if head == previous[0] and len(previous) == len(cells) and set(previous) == cells:
         return tuple(previous)
+
+    kept = tuple(previous[:CRASH_KEEP_LENGTH])
+    if head == previous[0] and len(kept) == len(cells) and set(kept) == cells:
+        return kept
 
     if manhattan(head, previous[0]) != 1:
         return None
@@ -357,7 +382,8 @@ def legal_moves(state, side=None):
         if target in state.walls:
             legal.append(direction)
             continue
-        eats = target in state.food
+        eats = target in state.food or target in (
+            state.tail_food_a if side == 'A' else state.tail_food_b)
         blocked = set(occupied)
         if not eats and side in state.reliable_tails:
             blocked.discard(snake[-1])
@@ -370,12 +396,53 @@ def legal_moves(state, side=None):
     return legal
 
 
+def available_moves(state, side=None):
+    """Prefer existing non-body collision actions; retain forced v7 crashes."""
+    side = side or state.side
+    if state.is_terminal() or not state.body(side):
+        return []
+    moves = legal_moves(state, side)
+    if moves:
+        return moves
+    body = state.body(side)
+    return [direction for direction in DIRS
+            if len(body) < 2 or step(body[0], direction) != body[1]]
+
+
 def apply_move(state, direction, side=None):
+    if state.is_terminal():
+        raise ValueError('Cannot move after the game has ended')
     side = side or state.side
     snake = state.body(side)
     if not snake:
         return state
     target = step(snake[0], direction)
+    tail_food = state.tail_food_a if side == 'A' else state.tail_food_b
+    grows = target in state.food or target in state.food_values or target in tail_food
+    blocked = state.occupied()
+    if not grows:
+        blocked.discard(snake[-1])
+    # A neck reversal remains filtered by legal_moves, but a directly applied
+    # self-collision must never create an overlapping body.
+    crashes = not in_bounds(state, target) or target in blocked or (
+        len(snake) > 1 and target == snake[1])
+    if crashes:
+        scores = dict(state.scores)
+        scores[side] = score_after_crash(scores.get(side, 0),
+                                         state.crashed_a if side == 'A' else state.crashed_b)
+        snakes = dict(state.snakes)
+        snakes[side] = snake[:CRASH_KEEP_LENGTH]
+        detached = frozenset(snake[CRASH_KEEP_LENGTH:])
+        return replace(
+            state, snakes=snakes, scores=scores,
+            side='B' if side == 'A' else 'A', enemy=side,
+            remaining_moves=max(0, state.remaining_moves - 1),
+            reliable_tails=state.reliable_tails | {side},
+            walls=shrink_wall(state.walls) if side == 'B' else state.walls,
+            tail_food_a=state.tail_food_a | (detached if side == 'B' else frozenset()),
+            tail_food_b=state.tail_food_b | (detached if side == 'A' else frozenset()),
+            crashed_a=True if side == 'A' else state.crashed_a,
+            crashed_b=True if side == 'B' else state.crashed_b)
     hits_wall = target in state.walls
     eats = target in state.food
     wrong_food = target in state.food_values and not eats
@@ -383,7 +450,7 @@ def apply_move(state, direction, side=None):
     if hits_wall:
         new_snake = snake
     else:
-        new_snake = (target,) + snake if eats else (target,) + snake[:-1]
+        new_snake = (target,) + snake if grows else (target,) + snake[:-1]
     snakes = dict(state.snakes)
     snakes[side] = new_snake
     scores = dict(state.scores)
@@ -391,6 +458,8 @@ def apply_move(state, direction, side=None):
     move_score = NORMAL_SCORE
     if hits_wall:
         move_score = WALL_HIT_PENALTY
+    elif target in tail_food:
+        move_score = tail_food_reward(multipliers.get(side, 1))
     elif eats:
         move_score = state.food_reward(side, target)
     elif wrong_food:
@@ -444,6 +513,10 @@ def apply_move(state, direction, side=None):
         multipliers=multipliers,
         walls=walls,
         food_copy_targets=food_copy_targets,
+        tail_food_a=state.tail_food_a - {target},
+        tail_food_b=state.tail_food_b - {target},
+        crashed_a=state.crashed_a,
+        crashed_b=state.crashed_b,
     )
 
 

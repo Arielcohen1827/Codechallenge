@@ -188,7 +188,7 @@ class TestViewer(unittest.TestCase):
                 patch('launch_bot.time.sleep'), patch('launch_bot.webbrowser.open') as browser:
             launch_bot.start_viewer()
         process.assert_called_once_with(
-            [launch_bot.sys.executable, str(launch_bot.ROOT / 'match_viewer.py')],
+            [launch_bot.sys.executable, '-m', 'tools.match_viewer'],
             cwd=launch_bot.ROOT, creationflags=0x08000000,
             stdout=launch_bot.subprocess.DEVNULL, stderr=launch_bot.subprocess.DEVNULL)
         browser.assert_called_once()

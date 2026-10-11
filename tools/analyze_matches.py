@@ -3,9 +3,9 @@ from collections import Counter, defaultdict
 import json
 from pathlib import Path
 
-from food_planner import choose_food_plan
-from snake_brain import final_safe_direction
-from snake_state import apply_move, in_bounds, legal_moves, parse_state, step
+from snake_bot.food_planner import choose_food_plan
+from snake_bot.snake_brain import final_safe_direction
+from snake_bot.snake_state import apply_move, in_bounds, legal_moves, parse_state, step
 
 
 def parse_log(path):

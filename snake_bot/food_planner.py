@@ -1,14 +1,17 @@
-from collections import deque
-from dataclasses import dataclass
+from __future__ import annotations
 
-from bot_weights import get_weights
-from snake_state import (
+from collections import deque
+from dataclasses import dataclass, replace
+
+from snake_bot.bot_weights import get_weights
+from snake_bot.game_rules import MULTIPLIER_PICKUP_SCORE, food_points, tail_food_reward
+from snake_bot.snake_state import (
     CRASH_PENALTY,
     DIRS,
     FOOD_SCORE,
-    RIVAL_CRASH_REWARD,
     GameState,
-    apply_move,
+    apply_move as official_apply_move,
+    available_moves,
     blocked_for_path,
     count_exits,
     direction_between,
@@ -25,6 +28,32 @@ from snake_state import (
     temporal_shortest_distance,
     temporal_shortest_path,
 )
+
+
+def move_outcomes(state, direction, side=None):
+    """Simulate both histories without treating an unknown snapshot as initial."""
+    side = side or state.side
+    field = 'crashed_a' if side == 'A' else 'crashed_b'
+    if getattr(state, field) is not None or state.scores.get(side, 0) <= 0:
+        return (official_apply_move(state, direction, side),)
+    first = official_apply_move(replace(state, **{field: False}), direction, side)
+    if getattr(first, field) is True:
+        repeated = official_apply_move(replace(state, **{field: True}), direction, side)
+        return (first, repeated)
+    return (replace(first, **{field: None}),)
+
+
+def apply_move(state, direction, side=None, perspective=None):
+    """Conservative simulated successor, never a persisted history prediction."""
+    side = side or state.side
+    perspective = perspective or side
+    enemy = 'B' if perspective == 'A' else 'A'
+    def outcome_key(result):
+        winner = result.terminal_winner()
+        terminal_rank = (-1 if winner == enemy else 1 if winner == perspective else 0)
+        return (terminal_rank if result.is_terminal() else 0,
+                result.scores.get(perspective, 0) - result.scores.get(enemy, 0))
+    return min(move_outcomes(state, direction, side), key=outcome_key)
 
 
 @dataclass(frozen=True)
@@ -64,7 +93,7 @@ class FoodPlan:
 def simulate_path_to_food(state, side, path):
     current = state
     for cell in path[1:]:
-        if cell in current.walls:
+        if current.is_terminal() or cell in current.walls:
             return None
         direction = direction_between(current.head(side), cell)
         if direction is None or direction not in legal_moves(current, side):
@@ -88,6 +117,10 @@ def simulate_path_to_food(state, side, path):
             multipliers=current.multipliers,
             walls=walls,
             food_copy_targets=current.food_copy_targets,
+            tail_food_a=current.tail_food_a,
+            tail_food_b=current.tail_food_b,
+            crashed_a=current.crashed_a,
+            crashed_b=current.crashed_b,
         )
     return current
 
@@ -246,7 +279,7 @@ def food_chain_score(state, side, consumed_food, hunger, distances=None):
             if len(path) < 2:
                 break
             digit = current.next_food_digit
-            reward = digit * FOOD_SCORE * max(1, current.multipliers.get(side, 1))
+            reward = food_points(digit, current.multipliers.get(side, 1))
             score = reward * weights['sequence_reward_point_value']
             score += max(0, 12 - distance) * weights['chain_food_value']
             score += max(-2, min(6, race_margin)) * weights['chain_race_value']
@@ -361,12 +394,12 @@ def advantage_control_context(state, side):
             recoverable_threat += estimated_multiplier_points(state, enemy) * min(2, len(state.pickups))
     else:
         recoverable_threat = min(2, len(state.food)) * FOOD_SCORE
-    recoverable_threat += min(2, len(state.pickups)) * 50
+    recoverable_threat += min(2, len(state.pickups)) * MULTIPLIER_PICKUP_SCORE
     current_enemy_reward = max(
         (state.food_reward(enemy, food) for food in state.food),
         default=0,
     )
-    crash_score_swing = RIVAL_CRASH_REWARD - CRASH_PENALTY
+    crash_score_swing = CRASH_PENALTY
     protected_lead = crash_score_swing + current_enemy_reward
 
     dynamic_lead = (
@@ -634,7 +667,12 @@ def food_plan_risk_penalty(state, food, our_distance, safety, space_after, exits
     return penalty
 
 
-def objective_kind(state, target):
+def objective_kind(state, target, side=None):
+    side = side or state.side
+    if target in state.tail_food_a:
+        return 'tail_food' if side == 'A' else 'tail_cleanup'
+    if target in state.tail_food_b:
+        return 'tail_food' if side == 'B' else 'tail_cleanup'
     return 'multiplier' if target in state.pickups else 'food'
 
 
@@ -682,7 +720,7 @@ def projected_sequence_income(state, side, travel_cost=0, multiplier=None, limit
             capture_percent = 10
 
         time_percent = max(35, 100 - max(0, arrival - 4) * 3)
-        reward = digit * FOOD_SCORE * multiplier
+        reward = food_points(digit, multiplier)
         projected += reward * capture_percent * time_percent // 10_000
         elapsed = arrival
         cursor = target
@@ -745,7 +783,7 @@ def sequence_gate_hold_move(state, side, legal, plan, deep_moves):
         return None
 
     projected_lead = lead + plan.objective_reward
-    enemy_next_reward = next_digit * FOOD_SCORE * max(1, state.multipliers.get(enemy, 1))
+    enemy_next_reward = food_points(next_digit, state.multipliers.get(enemy, 1))
     if projected_lead >= enemy_next_reward + weights['sequence_hold_score_buffer']:
         return None
 
@@ -767,8 +805,13 @@ def sequence_gate_hold_move(state, side, legal, plan, deep_moves):
 
 
 def objective_reward(state, side, target):
+    kind = objective_kind(state, target, side)
+    if kind == 'tail_cleanup':
+        return 0
+    if kind == 'tail_food':
+        return tail_food_reward(state.multipliers.get(side, 1))
     if target in state.pickups:
-        return 50
+        return MULTIPLIER_PICKUP_SCORE
     return state.food_reward(side, target)
 
 
@@ -850,7 +893,7 @@ def build_food_plan(state, side, food, current_target, hunger, food_race=None):
     occupied = state.occupied()
     temporal_tail_path = any(cell in occupied for cell in path[1:])
     endgame_acceptable = endgame_accepts_food_risk(state, our_distance, race_margin, safety)
-    kind = objective_kind(state, food)
+    kind = objective_kind(state, food, side)
     reward = objective_reward(state, side, food)
     enemy = state.enemy if side == state.side else ('B' if side == 'A' else 'A')
     projected_income = projected_sequence_income(after, side)
@@ -993,7 +1036,7 @@ def build_sequence_setup_plans(state, side, current_target, hunger):
         enemy_followup = max(1, manhattan(current_food, future_food))
         readiness = enemy_current_distance - our_distance
         race_margin = enemy_followup - 1 + readiness
-        future_reward = digit * FOOD_SCORE * max(1, state.multipliers.get(side, 1))
+        future_reward = food_points(digit, state.multipliers.get(side, 1))
         projected_income = projected_sequence_income(after, side)
         rival_projected_income = projected_sequence_income(after, enemy)
         economic_swing = projected_income - rival_projected_income
@@ -1305,23 +1348,28 @@ def rival_response_stats(state, side, direction, depth=1):
 
     enemy = state.enemy if side == state.side else ('B' if side == 'A' else 'A')
     after = apply_move(state, direction, side)
-    enemy_moves = legal_moves(after, enemy)
+    enemy_moves = available_moves(after, enemy)
     if not enemy_moves:
+        lost = after.is_terminal() and after.terminal_winner() == enemy
         return {
             'enemy_moves': 0,
             'zero_escape_replies': 0,
             'one_escape_replies': 0,
             'delayed_forced_zero_replies': 0,
-            'forced_zero': False,
-            'forced_delayed_zero': False,
+            'forced_zero': lost,
+            'forced_delayed_zero': lost,
         }
 
     zero_escape_replies = 0
     one_escape_replies = 0
     delayed_forced_zero_replies = 0
     for enemy_move in enemy_moves:
-        after_enemy = apply_move(after, enemy_move, enemy)
-        our_replies = legal_moves(after_enemy, side)
+        after_enemy = apply_move(after, enemy_move, enemy, perspective=side)
+        if after_enemy.is_terminal():
+            if after_enemy.terminal_winner() == enemy:
+                zero_escape_replies += 1
+            continue
+        our_replies = available_moves(after_enemy, side)
         if not our_replies:
             zero_escape_replies += 1
         elif len(our_replies) == 1:
@@ -1378,20 +1426,20 @@ def rival_space_penalty(state, side, direction):
     if immediate_exits <= 1:
         base += weights['one_exit_penalty']
 
-    enemy_moves = legal_moves(after, enemy)
+    enemy_moves = available_moves(after, enemy)
     if not enemy_moves:
         return base
 
     worst_reply = 0
     for enemy_move in enemy_moves:
-        after_enemy = apply_move(after, enemy_move, enemy)
+        after_enemy = apply_move(after, enemy_move, enemy, perspective=side)
         our_head = after_enemy.head(side)
         enemy_head = after_enemy.head(enemy)
         if our_head is None:
             worst_reply = max(worst_reply, 1_000_000)
             continue
 
-        replies = legal_moves(after_enemy, side)
+        replies = available_moves(after_enemy, side)
         blocked = strategic_blocked(after_enemy)
         own_region = len(flood_region(after_enemy, our_head, blocked))
         enemy_region = 0 if enemy_head is None else len(flood_region(after_enemy, enemy_head, blocked))
@@ -1470,54 +1518,21 @@ def hot_lost_food_penalty(state, side, direction):
 
 
 def winning_suicide_move(state, side):
-    """Return a guaranteed crash that ends the match with us still ahead."""
-    enemy = state.enemy if side == state.side else ('B' if side == 'A' else 'A')
-    projected_our_score = state.scores.get(side, 0) + CRASH_PENALTY
-    projected_enemy_score = state.scores.get(enemy, 0) + RIVAL_CRASH_REWARD
-    if projected_our_score <= projected_enemy_score:
-        return None
-
-    snake = state.body(side)
-    head = state.head(side)
-    if not snake or head is None:
-        return None
-    occupied_snakes = set()
-    for body in state.snakes.values():
-        occupied_snakes.update(body)
-    own_tail = snake[-1]
-    for direction in DIRS:
-        target = step(head, direction)
-        if not (0 <= target[0] < state.rows and 0 <= target[1] < state.cols):
-            return direction
-        if target in state.walls:
-            continue
-        if target in occupied_snakes:
-            if len(snake) > 1 and target == snake[1]:
-                return direction
-            if target == own_tail and side in state.reliable_tails:
-                continue
-            return direction
+    """Compatibility: ordinary crashes cannot close a match in v7."""
     return None
 
 
 def forced_kill_move(state, side, legal):
-    enemy = state.enemy if side == state.side else ('B' if side == 'A' else 'A')
-    for direction in legal:
-        after = apply_move(state, direction, side)
-        enemy_moves = legal_moves(after, enemy)
-        own_head = after.head(side)
-        if own_head is None:
-            continue
-        own_region = flood_region(after, own_head, strategic_blocked(after))
-        projected_our_score = after.scores.get(side, 0) + RIVAL_CRASH_REWARD
-        projected_enemy_score = after.scores.get(enemy, 0) + CRASH_PENALTY
-        wins_on_score = projected_our_score > projected_enemy_score
-        if not enemy_moves and wins_on_score and len(own_region) >= len(after.body(side)) + 3:
-            return direction
+    """Do not deliberately seek crashes or mistake an enclosure for a kill."""
     return None
 
 
 def survival_position_score(state, side):
+    if state.is_terminal():
+        winner = state.terminal_winner()
+        weights = get_weights()
+        return (weights['enemy_trapped_future_bonus'] if winner == side
+                else -weights['future_no_reply_penalty'] if winner else 0)
     head = state.head(side)
     if head is None:
         return -1_000_000
@@ -1577,16 +1592,17 @@ def survival_move_analysis(state, side, direction, plan=None, hunger=0, repeat_c
     exits = count_exits(after, side) if head is not None else 0
     enemy = state.enemy if side == state.side else ('B' if side == 'A' else 'A')
     enemy_head = after.head(enemy)
-    enemy_moves = legal_moves(after, enemy)
-    if head is not None and not enemy_moves:
-        future = weights['enemy_trapped_future_bonus']
+    enemy_moves = available_moves(after, enemy)
+    if after.is_terminal():
+        future = (weights['enemy_trapped_future_bonus'] if after.terminal_winner() == side
+                  else -weights['future_no_reply_penalty'] if after.terminal_winner() else 0)
         return {
             'direction': direction,
             'score': future + survival_position_score(after, side),
             'base_score': 0,
             'future_score': future,
             'enemy_reply': None,
-            'reply_count': 99,
+            'reply_count': 0,
             'region': len(region),
             'exits': exits,
             'food_now': head in state.food,
@@ -1617,9 +1633,11 @@ def survival_move_analysis(state, side, direction, plan=None, hunger=0, repeat_c
     for enemy_move in enemy_moves:
         enemy_target = None if enemy_head is None else step(enemy_head, enemy_move)
         enemy_food = enemy_target in after.food if enemy_target is not None else False
-        after_enemy = apply_move(after, enemy_move, enemy)
-        replies = legal_moves(after_enemy, side)
-        if not replies:
+        after_enemy = apply_move(after, enemy_move, enemy, perspective=side)
+        replies = available_moves(after_enemy, side)
+        if after_enemy.is_terminal():
+            reply_score = survival_position_score(after_enemy, side)
+        elif not replies:
             reply_score = -weights['future_no_reply_penalty']
         else:
             reply_score = max(
@@ -1631,7 +1649,7 @@ def survival_move_analysis(state, side, direction, plan=None, hunger=0, repeat_c
                 )
                 for reply in replies
             )
-        if enemy_food:
+        if enemy_food and not after_enemy.is_terminal():
             reply_score -= weights['future_enemy_food_penalty']
         if worst_future is None or reply_score < worst_future:
             worst_future = reply_score

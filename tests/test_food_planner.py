@@ -2,9 +2,9 @@ import unittest
 from dataclasses import replace
 from unittest.mock import patch
 
-import food_planner
+from snake_bot import food_planner
 import run
-from food_planner import (
+from snake_bot.food_planner import (
     FoodPlan,
     advantage_control_move,
     best_numbered_copy,
@@ -27,9 +27,9 @@ from food_planner import (
     territory_control_score,
     winning_suicide_move,
 )
-from snake_brain import SnakeBrain, final_safe_direction
-from snake_state import GameState, apply_move, count_exits, legal_moves, parse_state
-from test_run import turn
+from snake_bot.snake_brain import SnakeBrain, final_safe_direction
+from snake_bot.snake_state import GameState, apply_move, count_exits, legal_moves, parse_state
+from tests.test_run import turn
 
 
 def state_from(board, **changes):
@@ -146,17 +146,17 @@ class TestGlobalCopyStrategy(unittest.TestCase):
 
 
 class TestTerminalCloseout(unittest.TestCase):
-    def test_suicide_requires_more_than_1500_points(self):
+    def test_score_lead_never_enables_suicide_closeout(self):
         winning = open_state(
             snakes={'A': ((0, 2),), 'B': ((4, 6),)},
             scores={'A': 1501, 'B': 0},
         )
         tied = replace(winning, scores={'A': 1500, 'B': 0})
 
-        self.assertEqual(winning_suicide_move(winning, 'A'), 'up')
+        self.assertIsNone(winning_suicide_move(winning, 'A'))
         self.assertIsNone(winning_suicide_move(tied, 'A'))
 
-    def test_brain_preserves_a_winning_suicide(self):
+    def test_brain_rejects_border_suicide_despite_score_lead(self):
         data = turn(
             '| A   |\n|     |\n|    B|',
             score_1=2000,
@@ -167,22 +167,22 @@ class TestTerminalCloseout(unittest.TestCase):
 
         direction = brain.choose_move(data)
 
-        self.assertEqual(direction, 'up')
-        self.assertEqual(brain.safe_direction(data, direction), 'up')
-        self.assertEqual(final_safe_direction(data, direction), 'up')
-        self.assertEqual(brain.decision_debug('closeout')['reason'], 'winning_suicide')
+        self.assertIn(direction, legal_moves(parse_state(data), 'A'))
+        self.assertNotEqual(brain.safe_direction(data, 'up'), 'up')
+        self.assertNotEqual(final_safe_direction(data, 'up'), 'up')
+        self.assertNotEqual(brain.decision_debug('closeout')['reason'], 'winning_suicide')
 
     def test_no_body_or_head_has_no_suicide(self):
         state = open_state(snakes={'A': (), 'B': ((2, 5),)}, scores={'A': 3000, 'B': 0})
         self.assertIsNone(winning_suicide_move(state, 'A'))
 
-    def test_suicide_skips_hash_walls_and_a_releasing_tail(self):
+    def test_no_suicide_closeout_for_walls_neck_or_releasing_tail(self):
         blocked_up = open_state(
             snakes={'A': ((2, 2), (3, 2), (3, 1)), 'B': ((4, 6),)},
             walls=frozenset({(1, 2)}),
             scores={'A': 3000, 'B': 0},
         )
-        self.assertEqual(winning_suicide_move(blocked_up, 'A'), 'down')
+        self.assertIsNone(winning_suicide_move(blocked_up, 'A'))
 
         all_hash = replace(
             blocked_up,
@@ -196,7 +196,7 @@ class TestTerminalCloseout(unittest.TestCase):
             snakes={'A': ((2, 2), (3, 2)), 'B': ((4, 6),)},
             walls=frozenset({(1, 2)}),
         )
-        self.assertEqual(winning_suicide_move(length_two, 'A'), 'down')
+        self.assertIsNone(winning_suicide_move(length_two, 'A'))
 
 
 class TestSequenceAndRiskBranches(unittest.TestCase):
@@ -353,16 +353,15 @@ class TestFallbackAndSurvivalBranches(unittest.TestCase):
         self.assertIn('enemy_reply', analyses[0])
 
     def test_survival_enemy_trapped_and_suicidal_branches(self):
-        state = open_state()
-        with (
-            patch.object(food_planner, 'legal_moves', side_effect=[['up'], []]),
-            patch.object(food_planner, 'survival_position_score', return_value=123),
-        ):
-            trapped = survival_move_analysis(state, 'A', 'up')
-        self.assertEqual(trapped['reply_count'], 99)
+        state = open_state(rows=3, cols=4, food=frozenset(),
+                           snakes={'A': ((1, 1),), 'B': ((0, 0),)},
+                           crashed_a=False, crashed_b=False)
+        trapped = survival_move_analysis(state, 'A', 'up')
+        self.assertIsNotNone(trapped['enemy_reply'])
+        self.assertNotEqual(trapped['reply_count'], 99)
 
         with (
-            patch.object(food_planner, 'legal_moves', side_effect=[['up'], ['left']]),
+            patch.object(food_planner, 'legal_moves', return_value=['up']),
             patch.object(food_planner, 'classify_safety', return_value=('SUICIDAL', 1, 0, False)),
         ):
             suicidal = survival_move_analysis(state, 'A', 'up')

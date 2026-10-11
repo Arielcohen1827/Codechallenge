@@ -40,6 +40,30 @@ promote a move already classified as suicidal or a forced loss.
 - Python 3.9+
 - `websockets` (see `requirements.txt`)
 
+## Repository layout
+
+```text
+run.py                 Websocket client entrypoint
+launch_bot.py          Windows bot selector and viewer launcher
+boot.bat / boot1.bat   Windows startup runners
+install.bat / start.sh Installation and command-line startup
+coverage.bat          Local coverage runner
+snake_bot/            Rules, state, planning, search, version and weights
+tools/                Lab, analysis, benchmark, optimizer and viewer server
+tests/                Behavior tests (python -m unittest discover -v)
+docs/reglas/          Saved game rules and their page resources
+scripts/              Browser challenge helper (auto_challenge_page.js)
+viewer/               Viewer HTML, JavaScript and CSS
+games/                Local match logs and live snapshots (ignored)
+weights/              Local weight configurations and search outputs
+```
+
+Run tool commands from the repository root with `python -m tools.<name>`.
+Imports use `snake_bot.<module>` and `tools.<module>`. The root also keeps
+README, AGENTS, requirements, Git/CI configuration and the local `.env` and
+virtual environment. Logs, viewer resources and weight files retain their
+existing locations. The browser helper is now `scripts/auto_challenge_page.js`.
+
 ## Run
 
 ```bash
@@ -84,7 +108,7 @@ tokens in `.env_example` or other tracked files.
 
 ## Tests
 
-`test_run.py` covers the event handling, the move replies and the game log,
+`tests/test_run.py` covers the event handling, the move replies and the game log,
 using a fake websocket — nothing connects to the network.
 
 ```bash
@@ -94,6 +118,19 @@ python -m unittest discover -v
 They also run on GitHub Actions for every push and pull request
 (`.github/workflows/tests.yml`), on Python 3.9 and 3.12.
 
+Coverage uses the same repository-wide scope locally and in CI, with a 90%
+minimum. Run `coverage.bat` on Windows, or:
+
+```bash
+python -m coverage run -m unittest discover -v
+python -m coverage report --fail-under=90
+```
+
+Both runners use `.coveragerc` to measure all project Python code, including
+`snake_bot/`, `tools/`, `run.py` and `launch_bot.py`. Tests, virtual environments
+and generated Python caches are excluded. The 90% gate applies to source code
+only; missing lines are shown with two decimal places of coverage precision.
+
 ## Game logs
 
 When a match ends, the client writes a **`games/game_<game_id>.log`** file with
@@ -102,7 +139,7 @@ sent (`>`), as JSON, ending with the `game_over` event. Useful for replaying or
 debugging a match. The `games/` directory is git-ignored.
 
 Each new log starts with a local metadata line (`=`) containing the bot version
-from `bot_version.py`. Bump `BOT_VERSION` before a new test batch, for example
+from `snake_bot/bot_version.py`. Bump `BOT_VERSION` before a new test batch, for example
 `1.0`, `1.1`, `1.2`, so match results can be compared by version.
 
 ```
@@ -118,13 +155,19 @@ The `?` lines are local-only decision diagnostics. They include legal moves, the
 chosen food plan, candidate move penalties, rival pressure, and why the move was
 selected. They are not sent to the server.
 
+Analyze saved match results from the repository root:
+
+```bash
+python -m tools.analyze_matches "games/game_*.log"
+```
+
 ## Live match viewer
 
 While `run.py` is playing, it writes the latest state of every match to
 `games/live/`. Start the local viewer in another terminal:
 
 ```bash
-python match_viewer.py
+python -m tools.match_viewer
 ```
 
 Then open `http://127.0.0.1:8765`. The page refreshes every 750 ms and shows all
@@ -133,26 +176,26 @@ bot's latest decision. The viewer is local and never receives the bot token.
 
 ## Offline bot lab
 
-`bot_lab.py` runs repeatable local checks for the Snake bot without connecting
+`tools/bot_lab.py` runs repeatable local checks for the Snake bot without connecting
 to the Code Challenge server.
 
-Run deterministic v6 self-play simulations. Board dimensions are randomized
+Run seeded v6 self-play simulations. Board dimensions are randomized
 between 12 and 20 for every seed unless `--rows` and `--cols` are supplied:
 
 ```bash
-python bot_lab.py simulate --games 10 --seed 1 --turns 120
+python -m tools.bot_lab simulate --games 10 --seed 1 --turns 120
 ```
 
 Reevaluate real match positions using the current bot version:
 
 ```bash
-python bot_lab.py logs game_*.log
+python -m tools.bot_lab logs game_*.log
 ```
 
 For a faster sampled pass:
 
 ```bash
-python bot_lab.py logs game_*.log --max-positions 300
+python -m tools.bot_lab logs game_*.log --max-positions 300
 ```
 
 Useful metrics:
@@ -169,9 +212,36 @@ Useful metrics:
 - `safety_SAFE` / `safety_ACCEPTABLE_RISK`: immediate safety classification of
   the current version's decisions on logged positions.
 
+## Paired weight benchmark
+
+`tools/benchmark_bot.py` compares two explicit weight files using the current
+simulator and the same bot code. Each seed runs twice: candidate as A, then
+candidate as B. A always starts. Repetitions reuse the same seed list; timed
+search can still produce different decisions on repeated runs.
+
+```powershell
+venv\Scripts\python.exe -m tools.benchmark_bot --reference weights\active_weights.json --candidate weights\best_weights.json --seeds 2 --seed 1000 --repetitions 1 --turns 30 --output games\benchmarks\comparison.json
+```
+
+Both weight files are required. Missing weight keys use the current defaults,
+and the report records the full effective configurations and their hashes.
+The benchmark never saves or activates weights. Optional `--rows`, `--cols`
+and `--food` control the simulator; dimensions default to random 12-20 boards.
+
+The JSON contains `manifest`, `summary` and `games`: execution provenance,
+aggregates including candidate-side and paired results, and individual games
+with events attributed to candidate/reference. Duration means alternating
+simulation turns, not elapsed seconds. Win rates are fractions from 0 to 1;
+the rate excluding draws is null when every game is a draw.
+
+This first version does not record search diagnostics, total decision time or
+avoidable crashes. Results describe the existing local simulator, including
+its repair of illegal moves, rather than a certified copy of the server.
+Reports under `games/` are ignored by Git.
+
 ## Weight Optimizer
 
-`optimize_weights.py` runs a reproducible random search over the bot's scoring
+`tools/optimize_weights.py` runs a reproducible random search over the bot's scoring
 weights. It refines `weights/active_weights.json` when that file exists (or the
 defaults otherwise). Each candidate plays against that baseline and alternates
 sides, so the optimizer can compare real game score and score difference.
@@ -179,13 +249,13 @@ sides, so the optimizer can compare real game score and score difference.
 Quick search:
 
 ```bash
-python optimize_weights.py --trials 12 --games 3 --turns 80
+python -m tools.optimize_weights --trials 12 --games 3 --turns 80
 ```
 
 Use saved real games as extra pressure:
 
 ```bash
-python optimize_weights.py --trials 20 --games 4 --turns 100 --logs game_*.log
+python -m tools.optimize_weights --trials 20 --games 4 --turns 100 --logs game_*.log
 ```
 
 By default the optimizer samples up to 300 real log positions per candidate. Use
@@ -194,18 +264,18 @@ By default the optimizer samples up to 300 real log positions per candidate. Use
 Save and activate the best weights locally:
 
 ```bash
-python optimize_weights.py --trials 20 --games 4 --turns 100 --logs game_*.log --activate
+python -m tools.optimize_weights --trials 20 --games 4 --turns 100 --logs game_*.log --activate
 ```
 
 Refine only the score-lead control strategy without disturbing the other
 learned weights:
 
 ```bash
-python optimize_weights.py --tune-advantage-only --trials 20 --games 4 --turns 150
+python -m tools.optimize_weights --tune-advantage-only --trials 20 --games 4 --turns 150
 ```
 
 The bot automatically loads `weights/active_weights.json` when present. Delete
-that file to return to the default weights in `bot_weights.py`.
+that file to return to the default weights in `snake_bot/bot_weights.py`.
 
 In optimizer output:
 
@@ -228,7 +298,7 @@ Validated search mode keeps running batches until it finds a candidate that
 beats the thresholds, and only activates weights when the candidate passes:
 
 ```bash
-python optimize_weights.py --until-improvement --trials 30 --max-batches 6 --games 6 --turns 150 --logs game_*.log --max-log-positions 300 --min-diff 80 --max-edge100 50 --activate
+python -m tools.optimize_weights --until-improvement --trials 30 --max-batches 6 --games 6 --turns 150 --logs game_*.log --max-log-positions 300 --min-diff 80 --max-edge100 50 --activate
 ```
 
 If no candidate passes, it still writes `weights/best_weights.json`, but does

@@ -4,8 +4,8 @@ import random
 import time
 from pathlib import Path
 
-from bot_lab import evaluate_log_decisions, expand_log_paths, simulate_game, summarize_simulations
-from bot_weights import DEFAULT_WEIGHTS, load_weights, reset_active_weights, save_weights, set_active_weights
+from tools.bot_lab import evaluate_log_decisions, expand_log_paths, simulate_game, summarize_simulations
+from snake_bot.bot_weights import DEFAULT_WEIGHTS, load_weights, reset_active_weights, save_weights, set_active_weights
 
 
 TUNABLE_RANGES = {

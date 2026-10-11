@@ -5,7 +5,7 @@ import unittest
 from dataclasses import replace
 
 import run
-from food_planner import (
+from snake_bot.food_planner import (
     FoodPlan,
     advantage_control_context,
     advantage_control_move,
@@ -14,9 +14,9 @@ from food_planner import (
     should_commit_to_food,
     tempo_race_margin,
 )
-from move_search import rank_deep_moves
-from search_engine import IterativeSearchEngine
-from snake_state import GameState, legal_moves, shrink_wall, temporal_shortest_path, track_snake
+from snake_bot.move_search import rank_deep_moves
+from snake_bot.search_engine import IterativeSearchEngine
+from snake_bot.snake_state import GameState, apply_move, legal_moves, parse_state, shrink_wall, temporal_shortest_path, track_snake
 
 
 class FakeWebSocket:
@@ -379,14 +379,14 @@ class TestFoodFirstBrain(HistoryTestCase):
         self.assertEqual(groups[0], (1, ((0, 1), (0, 3), (1, 0))))
         self.assertEqual(groups[1], (2, ((0, 4), (1, 2))))
 
-    def test_wrong_number_penalizes_without_growth(self):
+    def test_wrong_number_penalizes_and_grows(self):
         board = '|A2 34|\n|1  5B|'
         state = run.parse_state(turn(board))
         before_length = len(state.body('A'))
 
         after = run.apply_move(state, 'right', 'A')
 
-        self.assertEqual(len(after.body('A')), before_length)
+        self.assertEqual(len(after.body('A')), before_length + 1)
         self.assertEqual(after.scores['A'], -500)
         self.assertEqual(after.next_food_digit, 1)
 
@@ -406,9 +406,9 @@ class TestFoodFirstBrain(HistoryTestCase):
         self.assertEqual(after.scores['A'], 50)
         self.assertEqual(after.multipliers['A'], 3)
 
-    def test_wall_hit_penalizes_without_moving_or_ending_game(self):
+    def test_first_wall_hit_resets_positive_score_without_moving_or_ending_game(self):
         board = '|A#   B|\n|       |'
-        state = run.parse_state(turn(board, score_1=1000))
+        state = run.parse_state(turn(board, score_1=1000), crash_history={'A': False, 'B': False})
         before = state.body('A')
 
         after = run.apply_move(state, 'right', 'A')
@@ -416,7 +416,7 @@ class TestFoodFirstBrain(HistoryTestCase):
         self.assertEqual(state.walls, frozenset({(0, 1)}))
         self.assertIn('right', run.legal_moves(state, 'A'))
         self.assertEqual(after.body('A'), before)
-        self.assertEqual(after.scores['A'], 500)
+        self.assertEqual(after.scores['A'], 0)
         self.assertEqual(after.side, 'B')
 
     def test_wall_shrinks_at_b_round_end(self):
@@ -561,7 +561,7 @@ class TestFoodFirstBrain(HistoryTestCase):
 
         self.assertGreater(behind_plan.value, ahead_plan.value)
 
-    def test_adjacent_multiplier_is_rejected_when_rival_can_close_every_exit(self):
+    def test_adjacent_multiplier_enclosure_is_not_automatic_terminal_loss(self):
         board = (
             '|              |\n'
             '|              |\n'
@@ -588,7 +588,14 @@ class TestFoodFirstBrain(HistoryTestCase):
 
         move = run.BOT.choose_move(data)
 
-        self.assertNotEqual(move, 'left')
+        state = parse_state(data)
+        self.assertIn(move, legal_moves(state, 'B'))
+        analyses = rank_deep_moves(state, 'B', legal_moves(state, 'B'), search_time_ms=10)
+        by_direction = {item['direction']: item for item in analyses}
+        self.assertFalse(by_direction['left']['forced_loss'])
+        after = apply_move(state, 'left', 'B')
+        self.assertEqual(after.multipliers['B'], 10)
+        self.assertFalse(after.is_terminal())
 
     def test_board_size_is_used_when_rows_and_cols_are_missing(self):
         data = turn('|A  |\n|  B|')
@@ -633,7 +640,7 @@ class TestFoodFirstBrain(HistoryTestCase):
 
         self.assertEqual(self.choose(board), 'right')
 
-    def test_food_inside_dead_bag_is_rejected(self):
+    def test_food_inside_enclosure_can_continue_by_crashing(self):
         board = (
             '|aaaaa|\n'
             '|aA*aa|\n'
@@ -641,7 +648,16 @@ class TestFoodFirstBrain(HistoryTestCase):
             '|B    |'
         )
 
-        self.assertNotEqual(self.choose(board), 'right')
+        state = replace(parse_state(turn(board)), crashed_a=False, crashed_b=False)
+        after_food = apply_move(state, 'right', 'A')
+        self.assertEqual(after_food.scores['A'], 100)
+        self.assertFalse(after_food.is_terminal())
+        after_crash = apply_move(after_food, 'right', 'A')
+        self.assertEqual(after_crash.scores['A'], 0)
+        self.assertEqual(len(after_crash.body('A')), 3)
+        self.assertFalse(after_crash.is_terminal())
+        analyses = rank_deep_moves(state, 'A', legal_moves(state, 'A'), search_time_ms=10)
+        self.assertFalse(next(item for item in analyses if item['direction'] == 'right')['forced_loss'])
 
     def test_food_path_accounts_for_own_tail_moving(self):
         board = (
@@ -958,14 +974,16 @@ class TestFoodFirstBrain(HistoryTestCase):
 
         self.assertEqual(self.choose(board), 'right')
 
-    def test_forced_kill_can_override_food(self):
+    def test_encircling_rival_is_not_a_forced_kill_override(self):
         board = (
             '|B  a|\n'
             '|aA a|\n'
             '| *aa|'
         )
 
-        self.assertEqual(self.choose(board), 'up')
+        move = self.choose(board)
+        self.assertIn(move, legal_moves(parse_state(turn(board)), 'A'))
+        self.assertNotEqual(run.BOT.decision_debug('g_1')['reason'], 'forced_kill')
 
     def test_forced_kill_is_not_taken_when_terminal_score_still_loses(self):
         board = (
@@ -999,7 +1017,7 @@ class TestFoodFirstBrain(HistoryTestCase):
 
         self.assertEqual(track_snake(previous, board, 'B'), previous)
 
-    def test_deep_search_treats_rival_zero_reply_as_forced_loss(self):
+    def test_deep_search_continues_after_zero_safe_reply(self):
         state = GameState(
             rows=12,
             cols=12,
@@ -1019,8 +1037,8 @@ class TestFoodFirstBrain(HistoryTestCase):
         analyses = rank_deep_moves(state, 'B', legal_moves(state, 'B'))
         by_direction = {item['direction']: item for item in analyses}
 
-        self.assertTrue(by_direction['left']['forced_loss'])
-        self.assertEqual(analyses[0]['direction'], 'up')
+        self.assertFalse(by_direction['left']['forced_loss'])
+        self.assertGreater(by_direction['left']['our_replies'], 0)
 
         fast_analyses = rank_deep_moves(
             state,
@@ -1029,8 +1047,8 @@ class TestFoodFirstBrain(HistoryTestCase):
             search_time_ms=10,
         )
         fast_by_direction = {item['direction']: item for item in fast_analyses}
-        self.assertTrue(fast_by_direction['left']['forced_loss'])
-        self.assertEqual(fast_analyses[0]['direction'], 'up')
+        self.assertFalse(fast_by_direction['left']['forced_loss'])
+        self.assertGreater(fast_by_direction['left']['our_replies'], 0)
 
     def test_ambiguous_body_shape_does_not_treat_body_as_free_tail(self):
         board = (
@@ -1254,7 +1272,7 @@ class TestIterativeSearchEngine(unittest.TestCase):
             side='B',
             score_1=100,
             score_2=1000,
-        ))
+        ), crash_history={'A': False, 'B': False})
 
         self.assert_transition_matches(state, 'right')
 

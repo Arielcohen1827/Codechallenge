@@ -3,10 +3,10 @@ import unittest
 from pathlib import Path
 from unittest.mock import AsyncMock, patch
 
-import bot_weights
+from snake_bot import bot_weights
 import run
-import snake_brain
-from food_planner import (
+from snake_bot import snake_brain
+from snake_bot.food_planner import (
     FoodPlan,
     can_reach_tail,
     distance_map,
@@ -14,9 +14,10 @@ from food_planner import (
     nearest_next_food_distance,
     simulate_path_to_food,
 )
-from snake_brain import SnakeBrain, final_safe_direction
-from snake_state import (
+from snake_bot.snake_brain import SnakeBrain, final_safe_direction
+from snake_bot.snake_state import (
     GameState,
+    legal_moves,
     normalize_side,
     parse_board,
     parse_state,
@@ -26,7 +27,7 @@ from snake_state import (
     temporal_shortest_path,
     track_snake,
 )
-from test_run import FakeWebSocket, turn
+from tests.test_run import FakeWebSocket, turn
 
 
 def empty_state(rows=3, cols=3, snakes=None, **changes):
@@ -158,16 +159,16 @@ class TestPlannerEdgeCases(unittest.TestCase):
 
 
 class TestBrainEdgeCases(unittest.TestCase):
-    def test_no_legal_move_and_forced_kill_shortcuts(self):
+    def test_no_safe_move_uses_crash_without_forced_kill_shortcut(self):
         brain = SnakeBrain()
         trapped = turn('|A|', game_id='trapped')
         self.assertEqual(brain.choose_move(trapped), 'up')
-        self.assertEqual(brain.decision_debug('trapped')['reason'], 'no_legal_moves')
+        self.assertEqual(brain.decision_debug('trapped')['reason'], 'no_safe_moves')
 
         data = turn('|A  |\n|   |\n|  B|', game_id='kill')
-        with patch.object(snake_brain, 'forced_kill_move', return_value='right'):
-            self.assertEqual(brain.choose_move(data), 'right')
-        self.assertEqual(brain.decision_debug('kill')['reason'], 'forced_kill')
+        direction = brain.choose_move(data)
+        self.assertIn(direction, legal_moves(parse_state(data), 'A'))
+        self.assertNotEqual(brain.decision_debug('kill')['reason'], 'forced_kill')
 
     def test_safe_direction_and_commit_without_cached_state(self):
         brain = SnakeBrain()
