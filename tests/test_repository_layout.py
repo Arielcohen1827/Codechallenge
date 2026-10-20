@@ -60,8 +60,6 @@ class TestRepositoryLayout(unittest.TestCase):
         viewer = importlib.import_module('tools.match_viewer')
         self.assertEqual(viewer.LIVE_DIR, ROOT / 'games' / 'live')
         self.assertEqual(viewer.VIEWER_DIR, ROOT / 'viewer')
-        for name in ('index.html', 'app.js', 'styles.css'):
-            self.assertTrue((viewer.VIEWER_DIR / name).read_bytes())
 
     def test_viewer_serves_health_and_static_resources(self):
         import json

@@ -284,29 +284,8 @@ async def on_challenge(websocket, request_data):
     challenge_id = data['challenge_id']
     opponent = str(data.get('opponent', 'desconocido'))
     normalized_opponent = opponent.strip().lower()
-    if not ACCEPT_INCOMING_CHALLENGES:
-        print_diagnostic(
-            f"all incoming challenges disabled: {challenge_id} "
-            f"(opponent: {opponent})"
-        )
-        return
-    if (
-        INCOMING_CHALLENGE_EXPECTED_OPPONENT
-        and normalized_opponent != INCOMING_CHALLENGE_EXPECTED_OPPONENT
-    ):
-        print_diagnostic(
-            f"unexpected incoming challenge ignored: {challenge_id} "
-            f"(opponent: {opponent})"
-        )
-        return
     tournament = is_tournament_challenge(data)
-    if not tournament and normalized_opponent not in ALLOWED_CHALLENGE_OPPONENTS:
-        print_diagnostic(
-            f"untrusted incoming challenge ignored: {challenge_id} "
-            f"(opponent: {opponent})"
-        )
-        return
-    reason = 'tournament' if tournament else 'allowed opponent'
+    reason = 'tournament' if tournament else 'any opponent'
     print_diagnostic(
         f"incoming challenge accepted by policy: {challenge_id} "
         f"(opponent: {opponent}; reason: {reason})"

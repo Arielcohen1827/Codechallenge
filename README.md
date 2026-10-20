@@ -37,7 +37,7 @@ promote a move already classified as suicidal or a forced loss.
 
 ## Requirements
 
-- Python 3.9+
+- Python 3.10+
 - `websockets` (see `requirements.txt`)
 
 ## Repository layout
@@ -116,7 +116,7 @@ python -m unittest discover -v
 ```
 
 They also run on GitHub Actions for every push and pull request
-(`.github/workflows/tests.yml`), on Python 3.9 and 3.12.
+(`.github/workflows/tests.yml`), on Python 3.10 and 3.12.
 
 Coverage uses the same repository-wide scope locally and in CI, with a 90%
 minimum. Run `coverage.bat` on Windows, or:

@@ -1,0 +1,149 @@
+<!doctype html>
+<html lang="es">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="referrer" content="no-referrer">
+  <title>Monitor local de desafios</title>
+  <style>
+    body { margin: 12px; background: #101418; color: #f4f7fb; font: 13px/1.4 system-ui, sans-serif; }
+    h1 { margin: 0 0 8px; font-size: 16px; }
+    p { margin: 6px 0; overflow-wrap: anywhere; }
+  </style>
+</head>
+<body>
+  <h1>Monitor local de desafios</h1>
+  <p id="status">Conectando...</p>
+  <script>
+  (() => {
+    "use strict";
+    const parentOrigin = "https://codechallenge.net.ar";
+    const protocol = "charmander-pool-v1";
+    const nonce = new URLSearchParams(location.hash.slice(1)).get("nonce");
+    const status = document.getElementById("status");
+    const peer = window.parent !== window ? window.parent : window.opener;
+    const ids = new Set();
+    const cache = new Map();
+    let connected = false;
+    let stopped = false;
+    let sequence = 0;
+    let baselineAt = 0;
+    let myBot = "";
+    let singleBotTelemetry = false;
+    let timer;
+    const say = (message) => { status.textContent = message; };
+    if (location.origin !== "http://127.0.0.1:8765" || !nonce || !/^[a-zA-Z0-9-]{20,80}$/.test(nonce)) {
+      say("Abrir este monitor desde el panel de CodeChallenge con su nonce de sesion.");
+      return;
+    }
+    if (!peer) {
+      say("Sin ventana de origen (posible COOP). Usar el monitor embebido del panel. Sin puente no se crean desafios.");
+      return;
+    }
+    const send = (type, extra = {}) => peer.postMessage({protocol, nonce, type, ...extra}, parentOrigin);
+    const validId = (id) => typeof id === "string" && /^[a-zA-Z0-9_-]{1,160}$/.test(id);
+    const metadata = (source, fallback) => {
+      const data = source.turn_data || source;
+      const name = (value, prior) => typeof value === "string" && value.trim()
+        && !/^Jugador [AB]$/i.test(value.trim()) ? value.slice(0, 160) : prior || "";
+      // Only this allowlist crosses origins; never send the raw API snapshot.
+      return {
+        game_id: source.game_id,
+        status: source.status,
+        player_1: name(data.player_1, fallback?.player_1),
+        player_2: name(data.player_2, fallback?.player_2),
+        side: ["A", "B"].includes(data.side) ? data.side : "",
+        started_at: Number(source.started_at || fallback?.started_at || 0),
+        updated_at: Number(source.updated_at || 0),
+      };
+    };
+    const get = async (path) => {
+      const controller = new AbortController();
+      const timeout = setTimeout(() => controller.abort(), 8000);
+      try {
+        const response = await fetch(path, {cache: "no-store", credentials: "omit", signal: controller.signal});
+        if (!response.ok) throw new Error("Local API unavailable");
+        return await response.json();
+      } finally {
+        clearTimeout(timeout);
+      }
+    };
+    const poll = async () => {
+      if (stopped) return;
+      if (!connected) {
+        send("hello");
+        say("Esperando handshake con CodeChallenge. Si no conecta, revisar COOP/CSP o abrir el monitor embebido.");
+      } else {
+        try {
+          const payload = await get("/api/games");
+          if (!Array.isArray(payload.games) || payload.games.some((g) => !validId(g.game_id)
+            || !["playing", "finished"].includes(g.status))) throw new Error("Invalid local metadata");
+          const listed = new Map(payload.games.map((g) => [g.game_id, metadata(g, cache.get(g.game_id))]));
+          // List truncation/order can hide newly finished games. Always query tracked IDs.
+          for (const g of listed.values()) {
+            const names = [g.player_1, g.player_2].map((name) => name.split("@")[0].trim().toLowerCase());
+            const unknown = names.some((name) => !name || /^jugador [ab]$/.test(name) || name === "arielcohen");
+            const own = names.includes(myBot) || (singleBotTelemetry && unknown);
+            if (own && (g.status === "playing" || (baselineAt && g.started_at > baselineAt))) ids.add(g.game_id);
+          }
+          const missing = [];
+          await Promise.allSettled([...ids].map(async (id) => {
+            try {
+              const raw = await get("/api/game/" + encodeURIComponent(id));
+              if (raw.game_id !== id || !["playing", "finished"].includes(raw.status)) throw new Error("Invalid game");
+              const g = metadata(raw, cache.get(id) || listed.get(id));
+              listed.set(id, g);
+              cache.set(id, g);
+              if (g.status === "finished") ids.delete(id);
+            } catch {
+              // Missing files and failed GETs are never completion signals.
+              const prior = cache.get(id) || listed.get(id);
+              if (prior) listed.set(id, {...prior, status: "playing"});
+              else listed.delete(id);
+              missing.push(id);
+            }
+          }));
+          if (!stopped) {
+            const at = Date.now();
+            if (!baselineAt) baselineAt = at / 1000;
+            // Playing sorts before finished: one finished row proves all active rows fit.
+            send("snapshot", {sequence: ++sequence, at, games: [...listed.values()],
+              missing, complete: payload.games.length < 100 || payload.games.some((g) => g.status === "finished")});
+            say(missing.length ? "Snapshots pendientes de confirmar; plazas reservadas." : "Telemetria local conectada. " + ids.size + " IDs seguidos.");
+          }
+        } catch {
+          if (!stopped) send("error");
+          say("API local sin datos actuales. Verificar bot y viewer; no se liberan plazas.");
+        }
+      }
+      if (!stopped) timer = setTimeout(poll, 2000);
+    };
+    const onMessage = (event) => {
+      if (event.origin !== parentOrigin || event.source !== peer) return;
+      const data = event.data;
+      if (!data || data.protocol !== protocol || data.nonce !== nonce) return;
+      if (data.type === "stop") {
+        stopped = true;
+        clearTimeout(timer);
+        window.removeEventListener("message", onMessage);
+        say("Sesion cerrada. Las partidas existentes no se cancelan.");
+        return;
+      }
+      if (!["init", "track"].includes(data.type) || !Array.isArray(data.ids)
+        || data.ids.length > 1000 || !data.ids.every(validId)) return;
+      if (data.type === "init") {
+        if (typeof data.myBot !== "string" || !data.myBot.trim() || data.myBot.length > 160
+          || typeof data.singleBotTelemetry !== "boolean") return;
+        myBot = data.myBot.trim().toLowerCase();
+        singleBotTelemetry = data.singleBotTelemetry;
+      } else if (!connected) return;
+      for (const id of data.ids) ids.add(id);
+      connected = true;
+    };
+    window.addEventListener("message", onMessage);
+    window.addEventListener("pagehide", () => { stopped = true; clearTimeout(timer); });
+    void poll();
+  })();
+  </script>
+</body>
+</html>

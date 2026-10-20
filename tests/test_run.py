@@ -102,7 +102,7 @@ class TestProtocol(InTempDirTestCase, unittest.IsolatedAsyncioTestCase):
         self.assertFalse(sent)
         self.assertEqual(websocket.sent, [])
 
-    async def test_untrusted_incoming_challenge_is_ignored_by_default(self):
+    async def test_incoming_challenge_accepts_any_opponent_by_default(self):
         websocket = FakeWebSocket([
             {
                 'event': 'challenge',
@@ -112,9 +112,11 @@ class TestProtocol(InTempDirTestCase, unittest.IsolatedAsyncioTestCase):
 
         await run.play(websocket)
 
-        self.assertEqual(websocket.sent, [])
+        self.assertEqual(websocket.sent, [
+            {'action': 'accept_challenge', 'data': {'challenge_id': 'c_1'}},
+        ])
 
-    async def test_incoming_challenge_can_be_enabled(self):
+    async def test_incoming_challenge_is_not_blocked_by_old_disable_flag(self):
         websocket = FakeWebSocket()
         request = {
             'event': 'challenge',
@@ -122,7 +124,7 @@ class TestProtocol(InTempDirTestCase, unittest.IsolatedAsyncioTestCase):
         }
 
         previous = run.ACCEPT_INCOMING_CHALLENGES
-        run.ACCEPT_INCOMING_CHALLENGES = True
+        run.ACCEPT_INCOMING_CHALLENGES = False
         try:
             await run.on_challenge(websocket, request)
         finally:
@@ -159,7 +161,7 @@ class TestProtocol(InTempDirTestCase, unittest.IsolatedAsyncioTestCase):
         self.assertTrue(run.is_tournament_challenge({'mode': 'torneo'}))
         self.assertFalse(run.is_tournament_challenge({'source': 'direct'}))
 
-    async def test_duplicate_accept_probe_is_limited_to_expected_opponent(self):
+    async def test_expected_opponent_filter_does_not_reject_other_challenges(self):
         websocket = FakeWebSocket()
         expected = {
             'event': 'challenge',
@@ -188,6 +190,8 @@ class TestProtocol(InTempDirTestCase, unittest.IsolatedAsyncioTestCase):
             ) = previous
 
         self.assertEqual(websocket.sent, [
+            {'action': 'accept_challenge', 'data': {'challenge_id': 'c_3'}},
+            {'action': 'accept_challenge', 'data': {'challenge_id': 'c_3'}},
             {'action': 'accept_challenge', 'data': {'challenge_id': 'c_2'}},
             {'action': 'accept_challenge', 'data': {'challenge_id': 'c_2'}},
         ])
@@ -263,7 +267,7 @@ class TestProtocol(InTempDirTestCase, unittest.IsolatedAsyncioTestCase):
 
         await run.play(websocket)
 
-        self.assertEqual([item['action'] for item in websocket.sent], ['move'])
+        self.assertEqual([item['action'] for item in websocket.sent], ['accept_challenge', 'move'])
         self.assertEqual([line[0] for line in self.read_log('g_1').splitlines()], ['=', '<', '?', '>', '<'])
 
     async def test_game_log_includes_bot_version_metadata(self):

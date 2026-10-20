@@ -1,4 +1,4 @@
-"""Observational copies only; never used by move selection or reconciliation."""
+v"""Observational copies only; never used by move selection or reconciliation."""
 from dataclasses import replace
 from snake_bot.snake_state import DIRS, apply_move, in_bounds, parse_board, step
 from snake_bot.game_rules import ELIMINATION_SCORE_THRESHOLD

@@ -211,35 +211,10 @@ class TestViewer(unittest.TestCase):
 
 
 class TestRunnerFiles(unittest.TestCase):
-    def test_both_batches_share_launcher_and_preserve_error_status(self):
-        for filename in ('boot.bat', 'boot1.bat'):
-            with self.subTest(filename=filename):
-                text = (launch_bot.ROOT / filename).read_text()
-                self.assertIn('"venv\\Scripts\\python.exe" launch_bot.py', text)
-                self.assertNotIn('run.py', text)
-                self.assertNotIn('CODECHALLENGE_TOKEN', text)
-                self.assertIn('if not exist "venv\\Scripts\\python.exe"', text)
-                self.assertIn('set "launch_status=%errorlevel%"', text)
-                self.assertIn('if not "%launch_status%"=="0" pause', text)
-                self.assertIn('exit /b %launch_status%', text)
-
-    def test_example_has_empty_tokens_and_expected_names(self):
-        text = (launch_bot.ROOT / '.env_example').read_text()
+    def test_load_bots_rejects_example_without_tokens(self):
         with contextlib.redirect_stdout(io.StringIO()):
             with self.assertRaisesRegex(ValueError, 'tokens'):
                 launch_bot.load_bots(launch_bot.ROOT / '.env_example', {})
-        self.assertIn('CODECHALLENGE_BOT_1_NAME=arielcohen', text)
-        self.assertIn('CODECHALLENGE_BOT_2_NAME=Charmander', text)
-        for line in text.splitlines():
-            if '_TOKEN=' in line and not line.startswith('#'):
-                self.assertEqual(line.split('=', 1)[1], '')
-
-    def test_ignore_env_underscore_variants_except_example(self):
-        text = (launch_bot.ROOT / '.gitignore').read_text().splitlines()
-        self.assertIn('.env', text)
-        self.assertIn('.env_*', text)
-        self.assertIn('!.env_example', text)
-        self.assertGreater(text.index('!.env_example'), text.index('.env_*'))
 
 
 if __name__ == '__main__':

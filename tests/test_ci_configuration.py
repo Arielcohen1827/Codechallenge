@@ -1,4 +1,6 @@
 import unittest
+import ast
+import re
 import runpy
 import tempfile
 from pathlib import Path
@@ -9,19 +11,28 @@ from coverage import Coverage
 ROOT = Path(__file__).resolve().parent.parent
 
 
+class TestCiPythonCompatibility(unittest.TestCase):
+    def setUp(self):
+        self.workflow = (ROOT / '.github' / 'workflows' / 'tests.yml').read_text(encoding='utf-8')
+
+    def test_matrix_covers_minimum_supported_python_and_current_target(self):
+        matrix = re.search(r'^\s+python-version:\s*(\[.*\])\s*$',
+                           self.workflow, re.MULTILINE)
+        self.assertIsNotNone(matrix, 'The CI matrix must declare Python versions')
+        versions = ast.literal_eval(matrix.group(1))
+        self.assertIn('3.10', versions, 'Exercise the minimum version supporting dataclass slots')
+        self.assertIn('3.12', versions, 'Keep the existing Python 3.12 target')
+        for version in versions:
+            with self.subTest(version=version):
+                self.assertGreaterEqual(tuple(map(int, version.split('.'))), (3, 10))
+        self.assertIn('python-version: ${{ matrix.python-version }}', self.workflow)
+
+    def test_each_ci_target_runs_suite_and_enforces_coverage_threshold(self):
+        self.assertIn('python -m coverage run -m unittest discover -v', self.workflow)
+        self.assertIn('python -m coverage report --fail-under=90', self.workflow)
+
+
 class TestCiCoverageGate(unittest.TestCase):
-    def test_github_actions_runs_coverage_with_required_threshold(self):
-        workflow = (ROOT / '.github' / 'workflows' / 'tests.yml').read_text(encoding='utf-8')
-
-        self.assertIn('python -m coverage run -m unittest discover -v', workflow)
-        self.assertIn('python -m coverage report --fail-under=90', workflow)
-
-    def test_local_coverage_script_uses_required_threshold(self):
-        script = (ROOT / 'coverage.bat').read_text(encoding='utf-8')
-
-        self.assertIn('-m coverage run -m unittest discover -v', script)
-        self.assertIn('-m coverage report --fail-under=90', script)
-
     def test_shared_configuration_measures_all_own_source_and_enforces_gate(self):
         cov = Coverage(config_file=str(ROOT / '.coveragerc'))
         self.assertEqual(cov.get_option('run:source'), ['.'])

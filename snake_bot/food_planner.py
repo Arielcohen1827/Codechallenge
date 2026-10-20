@@ -870,6 +870,13 @@ def build_food_plan(state, side, food, current_target, hunger, food_race=None):
     if path is None or len(path) < 2:
         return None
 
+    our_distance = len(path) - 1
+    kind = objective_kind(state, food, side)
+    if kind == 'multiplier':
+        arrival_cost = 2 * our_distance - (1 if side == state.side else 0)
+        if arrival_cost > state.remaining_moves:
+            return None
+
     after = simulate_path_to_food(state, side, path)
     if after is None:
         return None
@@ -880,7 +887,6 @@ def build_food_plan(state, side, food, current_target, hunger, food_race=None):
         enemy_distance = food_race['enemy_distance']
     elif enemy_head is not None:
         enemy_distance = temporal_shortest_distance(state, enemy_head, food, state.enemy)
-    our_distance = len(path) - 1
     race_margin = tempo_race_margin(state, side, our_distance, enemy_distance)
     tempo_urgency = score_gap_urgency(state, side)
     effective_hunger = hunger + tempo_urgency
@@ -893,11 +899,17 @@ def build_food_plan(state, side, food, current_target, hunger, food_race=None):
     occupied = state.occupied()
     temporal_tail_path = any(cell in occupied for cell in path[1:])
     endgame_acceptable = endgame_accepts_food_risk(state, our_distance, race_margin, safety)
-    kind = objective_kind(state, food, side)
     reward = objective_reward(state, side, food)
     enemy = state.enemy if side == state.side else ('B' if side == 'A' else 'A')
-    projected_income = projected_sequence_income(after, side)
-    rival_projected_income = projected_sequence_income(after, enemy)
+    economic_after = after
+    if kind == 'multiplier':
+        # Keep the shared geometric simulation; only X income uses global tempo.
+        economic_after = replace(
+            after, remaining_moves=state.remaining_moves - arrival_cost,
+            side=enemy, enemy=side,
+        )
+    projected_income = projected_sequence_income(economic_after, side)
+    rival_projected_income = projected_sequence_income(economic_after, enemy)
     economic_swing = projected_income - rival_projected_income
     multiplier_marginal = 0
 
@@ -1106,6 +1118,12 @@ def build_food_plans(state, side, current_target=None, hunger=0):
 
 def choose_food_plan(state, side, current_target=None, hunger=0, plans=None):
     plans = build_food_plans(state, side, current_target, hunger) if plans is None else list(plans)
+    own_turns_left = (state.remaining_moves + (1 if side == state.side else 0)) // 2
+    plans = [
+        p for p in plans
+        if (p.objective_kind != 'multiplier' and p.food not in state.pickups)
+        or p.our_distance <= own_turns_left
+    ]
     viable = [p for p in plans if p.safety in ('SAFE', 'ACCEPTABLE_RISK') or p.endgame_acceptable]
     if not viable:
         viable = [p for p in plans if p.safety == 'DANGEROUS' and hunger >= 35 and p.race_margin >= 0]
