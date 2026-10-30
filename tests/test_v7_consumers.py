@@ -57,7 +57,7 @@ class TestV7Consumers(unittest.TestCase):
         from snake_bot.move_search import state_key
         self.assertNotEqual(state_key(state), state_key(replace(state, food_copy_targets={1: 2})))
 
-    def test_tail_reward_depends_on_beneficiary_without_new_planner_targets(self):
+    def test_tail_reward_and_planner_target_belong_only_to_beneficiary(self):
         for side, field in (('A', 'tail_food_a'), ('B', 'tail_food_b')):
             cell = (0, 1)
             state = open_state(food=frozenset(), multipliers={'A': 3, 'B': 3},
@@ -65,7 +65,14 @@ class TestV7Consumers(unittest.TestCase):
             enemy = 'B' if side == 'A' else 'A'
             self.assertEqual(objective_reward(state, side, cell), 300)
             self.assertEqual(objective_reward(state, enemy, cell), 0)
-            self.assertEqual(build_food_plans(state, side), [])
+            # V8/v9 decision policy lets owned tail food compete with shot
+            # food; the v7 ownership and reward rules remain unchanged.
+            plans = build_food_plans(state, side)
+            self.assertEqual(len(plans), 1)
+            self.assertEqual(plans[0].food, cell)
+            self.assertEqual(plans[0].objective_kind, 'tail_food')
+            self.assertEqual(plans[0].objective_reward, 300)
+            self.assertEqual(build_food_plans(state, enemy), [])
 
     def test_unknown_rival_crash_uses_root_perspective_without_mutating_history(self):
         state = self.trapped(scores={'A': 0, 'B': 1000})

@@ -17,13 +17,16 @@ from snake_bot.food_planner import (
     position_control_penalty,
 )
 from snake_bot.snake_brain import SnakeBrain
-from snake_bot.game_rules import ELIMINATION_SCORE_THRESHOLD, MAX_MOVES
+from snake_bot.game_rules import (ELIMINATION_SCORE_THRESHOLD, MAX_MOVES,
+                                  within_blast_zone, bomb_respawn_candidates)
 from snake_bot.snake_state import (
     GameState,
     apply_move,
+    apply_action,
     cyclic_digit,
     legal_moves,
     parse_state,
+    star_spawn_candidates,
     step,
 )
 
@@ -80,6 +83,10 @@ def render_board(state):
     else:
         for r, c in state.food:
             board[r][c] = '*'
+    for cells, symbol in ((state.bombs_large, '\U0001f4a3'), (state.bombs_small, '\U0001f9e8'),
+                          (state.shot_food, '*'), (state.stars, '\u2b50')):
+        for r, c in cells:
+            board[r][c] = symbol
     for r, c in state.pickups:
         board[r][c] = 'X'
     for cells, symbol in ((state.tail_food_a, '\u24b6'), (state.tail_food_b, '\u24b7')):
@@ -87,8 +94,10 @@ def render_board(state):
             board[r][c] = symbol
     for side in ('A', 'B'):
         body = state.body(side)
+        head_symbol = side.lower() if state.invincibility(side) else side
+        body_symbol = side if state.invincibility(side) else side.lower()
         for index, (r, c) in enumerate(reversed(body)):
-            board[r][c] = side if index == len(body) - 1 else side.lower()
+            board[r][c] = head_symbol if index == len(body) - 1 else body_symbol
     return '\n'.join('|' + ''.join(row) + '|' for row in board)
 
 
@@ -106,10 +115,16 @@ def make_turn_data(state, game_id, turn_index):
         'remaining_moves': state.remaining_moves,
         'multiplier_1': state.multipliers.get('A', 1),
         'multiplier_2': state.multipliers.get('B', 1),
+        'invincible_1': state.invincible_a,
+        'invincible_2': state.invincible_b,
+        'timeouts_1': state.timeouts_a,
+        'timeouts_2': state.timeouts_b,
     }
 
 
 def spawn_food(state, rng, food_count, numbered=True, pickup_count=2):
+    state = respawn_bombs(state, rng)
+    state = respawn_stars(state, rng)
     occupied = state.occupied()
     food = set(state.food)
     food_values = dict(state.food_values)
@@ -122,6 +137,9 @@ def spawn_food(state, rng, food_count, numbered=True, pickup_count=2):
         for c in range(state.cols)
         if (r, c) not in occupied and (r, c) not in food_values and (r, c) not in food and (r, c) not in pickups
         and (r, c) not in state.tail_food_a and (r, c) not in state.tail_food_b
+        and (r, c) not in state.shot_food
+        and (r, c) not in state.stars
+        and not in_blast_zone(state, (r, c))
     ]
     rng.shuffle(empties)
     next_digit = state.next_food_digit or 1
@@ -144,28 +162,54 @@ def spawn_food(state, rng, food_count, numbered=True, pickup_count=2):
         pickups.add(empties.pop())
     if not walls:
         walls = set(spawn_wall(empties, state.rows, state.cols, rng))
-    return GameState(
-        rows=state.rows,
-        cols=state.cols,
-        board=render_board(state),
-        side=state.side,
-        enemy=state.enemy,
-        snakes=state.snakes,
-        food=frozenset(food),
-        scores=state.scores,
-        remaining_moves=state.remaining_moves,
-        reliable_tails=state.reliable_tails,
-        food_values=food_values,
-        next_food_digit=next_digit if numbered else None,
-        pickups=frozenset(pickups),
-        multipliers=state.multipliers,
-        walls=frozenset(walls),
-        food_copy_targets=food_copy_targets,
-        tail_food_a=state.tail_food_a,
-        tail_food_b=state.tail_food_b,
-        crashed_a=state.crashed_a,
-        crashed_b=state.crashed_b,
-    )
+    state = replace(state, food=frozenset(food),
+                   food_values=food_values, next_food_digit=next_digit if numbered else None,
+                   pickups=frozenset(pickups), walls=frozenset(walls),
+                   food_copy_targets=food_copy_targets)
+    return replace(state, board=render_board(state))
+
+
+def in_blast_zone(state, cell):
+    return within_blast_zone(cell, state.bombs_large, state.bombs_small)
+
+
+def respawn_bombs(state, rng):
+    """Only the lab supplies RNG; core transitions retain unknown respawn types."""
+    if state.remaining_moves <= 100:
+        return replace(state, bombs_large=frozenset(), bombs_small=frozenset(), pending_bomb_respawns=())
+    large, small = set(state.bombs_large), set(state.bombs_small)
+    pending = []
+    for kind in state.pending_bomb_respawns:
+        forbidden = (state.occupied() | set(state.food) | set(state.food_values)
+                     | set(state.pickups) | set(state.tail_food_a) | set(state.tail_food_b)
+                     | set(state.shot_food) | set(state.stars) | large | small)
+        edible = (set(state.food) | set(state.food_values) | set(state.pickups)
+                  | set(state.tail_food_a) | set(state.tail_food_b) | set(state.shot_food) | set(state.stars))
+        candidates = bomb_respawn_candidates(
+            state.rows, state.cols, kind,
+            tuple(state.head(side) for side in ('A', 'B') if state.head(side) is not None),
+            occupied=forbidden, edible=edible)
+        if candidates:
+            (large if kind == 'large' else small).add(rng.choice(candidates))
+        else:
+            pending.append(kind)
+    return replace(state, bombs_large=frozenset(large), bombs_small=frozenset(small), pending_bomb_respawns=tuple(pending))
+
+
+def respawn_stars(state, rng):
+    """Resolve only eligible unknown spawns; search never chooses random cells."""
+    if not state.star_frenzy and (state.invincible_a or state.invincible_b):
+        return replace(state, pending_star_spawns=0)
+    missing = max(0, 10 - len(state.stars)) if state.star_frenzy else min(
+        state.pending_star_spawns, max(0, 1 - len(state.stars)))
+    while missing:
+        candidates = star_spawn_candidates(state)
+        if not candidates:
+            break
+        state = replace(state, stars=state.stars | {rng.choice(candidates)})
+        missing -= 1
+    return replace(state, pending_star_spawns=missing)
+
 
 
 def spawn_wall(empties, rows, cols, rng):
@@ -194,7 +238,7 @@ def validate_move_budget(max_turns):
         raise ValueError(f'max_turns must be an integer from 0 to {MAX_MOVES}')
 
 
-def initial_state(seed, rows=15, cols=15, food_count=5, max_turns=MAX_MOVES, numbered=True):
+def initial_state(seed, rows=20, cols=20, food_count=5, max_turns=MAX_MOVES, numbered=True):
     validate_move_budget(max_turns)
     rng = random.Random(seed)
     middle = rows // 2
@@ -219,6 +263,7 @@ def initial_state(seed, rows=15, cols=15, food_count=5, max_turns=MAX_MOVES, num
         crashed_a=False,
         crashed_b=False,
     )
+    state = replace(state, pending_bomb_respawns=('large',) * 2 + ('small',) * 5 if max_turns > 100 else ())
     return spawn_food(state, rng, food_count, numbered=numbered)
 
 
@@ -233,19 +278,37 @@ def winner_for(state, dead_side=None):
     return 'A' if score_a > score_b else 'B'
 
 
-def lab_transition(state, direction):
+def lab_transition(state, direction, action_type='move'):
     """Apply core rules once; diagnose the observed transition without respawns."""
     if direction not in DIRECTIONS:
         raise ValueError(f'Invalid direction: {direction!r}')
     side, enemy = state.side, state.enemy
-    after = apply_move(state, direction, side)
+    after = apply_move(state, direction, side) if action_type == 'move' else apply_action(state, action_type, direction, side)
     events = Counter()
+    metadata = after.last_action
+    if metadata.get('star_consumed'):
+        events[f'stars_collected_{side}'] += 1
+    if metadata.get('ram_cut'):
+        events[f'ram_cuts_{side}'] += 1
+        events[f'ram_cut_length_{side}'] += metadata.get('cut_length', 0)
+    if metadata.get('shot_blocked_by_invincibility'):
+        events[f'shots_blocked_by_invincibility_{side}'] += 1
+    if action_type == 'shoot':
+        events[f'shots_{side}'] += int(state.scores.get(side, 0) >= 5000)
+        events[f'shot_hits_{side}'] += int(bool(metadata.get('hit')))
+        events[f'shot_food_generated_{side}'] += len(after.shot_food - state.shot_food)
+        return after, events
+    if metadata.get('bomb_triggered'):
+        events[f'bombs_triggered_{side}'] += 1
+    if state.head(side) is not None and step(state.head(side), direction) in state.shot_food:
+        events[f'shot_food_collected_{side}'] += 1
     if not state.body(side):
         return after, events
     target = step(state.head(side), direction)
     history = state.crashed_a if side == 'A' else state.crashed_b
     after_history = after.crashed_a if side == 'A' else after.crashed_b
-    crashed = after.head(side) == state.head(side) and after_history is True
+    crashed = (not state.invincibility(side) and after.head(side) == state.head(side)
+               and after_history is True)
     if crashed:
         events[f'total_crashes_{side}'] += 1
         kind = 'first' if history is False else 'subsequent' if history is True else 'unknown'
@@ -274,7 +337,7 @@ def lab_transition(state, direction):
             events[f'tail_cleaned_{side}'] += 1
         if target in state.pickups:
             events[f'pickups_{side}'] += 1
-    if target in state.walls:
+    if target in state.walls and not state.invincibility(side):
         events[f'wall_hits_{side}'] += 1
     for beneficiary, before_cells, after_cells in (
             ('A', state.tail_food_a, after.tail_food_a),
@@ -303,8 +366,8 @@ def observe_simulation_state(brain, state, data):
 def simulate_game(seed, max_turns=MAX_MOVES, rows=None, cols=None, food_count=5, weights_by_side=None, candidate_side=None):
     validate_move_budget(max_turns)
     rng = random.Random(seed)
-    rows = rows or rng.randint(12, 20)
-    cols = cols or rng.randint(12, 20)
+    rows = rows or rng.randint(20, 30)
+    cols = cols or rng.randint(20, 30)
     state = initial_state(seed, rows, cols, food_count, max_turns)
     brains = {'A': SnakeBrain(enable_debug=False), 'B': SnakeBrain(enable_debug=False)}
     metrics = Counter()
@@ -320,21 +383,30 @@ def simulate_game(seed, max_turns=MAX_MOVES, rows=None, cols=None, food_count=5,
         data = make_turn_data(state, game_id, turn_index)
         brain = brains[side]
         observe_simulation_state(brain, state, data)
-        direction = brain.choose_move(data)
+        action = brain.choose_action(data)
+        if action is None:
+            raise ValueError('Invalid direction: None')
+        if not isinstance(action, dict):
+            action = {'action_type': 'move', 'direction': brain.choose_move(data)}
+        direction = action['direction']
+        action_type = action['action_type']
         if direction not in DIRECTIONS:
             raise ValueError(f'Invalid direction: {direction!r}')
         debug = brain.decision_debug(game_id) or {}
         if debug.get('reason') == 'advantage_control':
             metrics[f'control_moves_{side}'] += 1
-        if position_control_penalty(state, side, direction) > 0:
+        if action_type == 'move' and position_control_penalty(state, side, direction) > 0:
             metrics['edge_moves'] += 1
 
-        state, events = lab_transition(state, direction)
+        state, events = lab_transition(state, direction, action_type)
         metrics.update(events)
         turns += 1
         head = state.head(side)
         metrics['center_score_total'] += center_control_score(state, head)
-        brain.commit_move(data, direction)
+        if action_type == 'move':
+            brain.commit_move(data, direction)
+        else:
+            brain.commit_action(data, action)
         if state.is_terminal():
             break
         state = spawn_food(state, rng, food_count)
@@ -520,8 +592,10 @@ def evaluate_log_decisions(paths, max_positions=None):
         after = apply_move(state, direction, side)
         safety, _, _, _ = classify_safety(after, side)
         metrics[f'safety_{safety}'] += 1
-        if step(state.head(side), direction) in state.food:
+        if step(state.head(side), direction) in state.food | state.shot_food:
             metrics['food_taken_now'] += 1
+        if step(state.head(side), direction) in state.shot_food:
+            metrics['shot_food_taken_now'] += 1
         if step(state.head(side), direction) in state.walls:
             metrics['wall_hit'] += 1
         if position_control_penalty(state, side, direction) > 0:
@@ -564,8 +638,8 @@ def main():
     sim.add_argument('--games', type=int, default=50)
     sim.add_argument('--seed', type=int, default=1)
     sim.add_argument('--turns', type=int, default=MAX_MOVES)
-    sim.add_argument('--rows', type=int, default=0, help='0 chooses a random size from 12 to 20')
-    sim.add_argument('--cols', type=int, default=0, help='0 chooses a random size from 12 to 20')
+    sim.add_argument('--rows', type=int, default=0, help='0 chooses a random size from 20 to 30')
+    sim.add_argument('--cols', type=int, default=0, help='0 chooses a random size from 20 to 30')
     sim.add_argument('--food', type=int, default=5)
     sim.add_argument('--json', action='store_true')
 

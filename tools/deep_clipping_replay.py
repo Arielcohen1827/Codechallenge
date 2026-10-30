@@ -15,11 +15,13 @@ import re
 from statistics import median
 import sys
 from time import perf_counter
-from types import SimpleNamespace
+from types import SimpleNamespace, ModuleType
+import zipfile
 
 ROOT = Path(__file__).resolve().parents[1]
 REFERENCE_X = '64dd15b53bc755af443cee49948c368ce41bac3097a3eab32c5c95a6875e68e3'
 REFERENCE_SEARCH = '09142bcc462f3ae8954e6527c21cb4f80784e1d0c4db2b10372db438a44d3dc4'
+FROZEN_SOURCES = ROOT / 'tests/fixtures/deep_v7_sources.zip'
 OBSERVED_FIELDS = ('game_id', 'board', 'side', 'remaining_moves', 'rows', 'cols',
                    'board_size', 'score_1', 'score_2', 'multiplier_1', 'multiplier_2')
 CONTEXT_FIELDS = ('side', 'head', 'enemy_head', 'scores', 'multipliers', 'food',
@@ -132,6 +134,32 @@ def hypothetical_adjustments(rows, depth, remaining, root_terminal=False):
 
 def load_baseline(path):
     return load_source(path, REFERENCE_SEARCH)
+
+
+def frozen_source(name, expected_hash=None):
+    """Read exact historical bytes, independently of mutable production code."""
+    with zipfile.ZipFile(FROZEN_SOURCES) as archive:
+        manifest = json.loads(archive.read('provenance.json'))
+        raw = archive.read(name)
+    if digest(raw) != (expected_hash or manifest['sources'][name]):
+        raise ValueError('Frozen historical source hash mismatch: ' + name)
+    return raw
+
+
+def load_frozen_module(name, expected_hash):
+    raw = frozen_source(name, expected_hash)
+    module_name = '_historical_' + expected_hash[:12]
+    module = ModuleType(module_name)
+    module.__file__ = str(FROZEN_SOURCES) + '/' + name
+    sys.modules[module_name] = module
+    exec(compile(raw, module.__file__, 'exec'), module.__dict__)
+    return module
+
+
+def load_reference_planner(weights):
+    planner = load_frozen_module('snake_bot/food_planner.py', REFERENCE_X)
+    planner.get_weights = lambda: weights
+    return planner
 
 
 def load_source(path, expected_hash):
@@ -371,11 +399,12 @@ def hashed_repeat_count(self, game_id, state):
 
 
 def replay_current_reference(case, source, candidate=None):
-    from snake_bot import food_planner, snake_brain, bot_weights
+    from snake_bot import snake_brain, bot_weights
     from tools.compare_food_planners import private_namespace, private_class
-    if digest(Path(food_planner.__file__).read_bytes()) != REFERENCE_X:
-        raise ValueError('Current X reference hash mismatch')
     weights = dict(bot_weights.get_weights())
+    # This is a historical replay: v8/v9 source changes must not silently
+    # replace the exact accepted X planner or force its hash to be repinned.
+    food_planner = load_reference_planner(weights)
     tape = FrozenEngine(case)
     def brain_factory(ranking_source):
         ranking = private_namespace(ranking_source, food_planner, weights)

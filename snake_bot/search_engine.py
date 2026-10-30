@@ -2,17 +2,13 @@ from dataclasses import dataclass, replace
 from time import perf_counter
 from typing import Optional
 from snake_bot.game_rules import (
-    food_points, score_after_crash, tail_food_reward,
-    CRASH_KEEP_LENGTH, ELIMINATION_SCORE_THRESHOLD,
+    food_points, ELIMINATION_SCORE_THRESHOLD, SHOOT_COST, shoot_directions,
+    STAR_TURNS,
 )
 
 from snake_bot.snake_state import (
     DIRS,
     FOOD_SCORE,
-    MULTIPLIER_PICKUP_SCORE,
-    NORMAL_SCORE,
-    WALL_HIT_PENALTY,
-    WRONG_FOOD_PENALTY,
     cyclic_digit,
 )
 
@@ -43,8 +39,31 @@ class CompactState:
     tail_food_b: tuple[int, ...] = ()
     crashed_a: Optional[bool] = None
     crashed_b: Optional[bool] = None
+    bombs_large: tuple[int, ...] = ()
+    bombs_small: tuple[int, ...] = ()
+    shot_food: tuple[int, ...] = ()
+    pending_bomb_respawns: tuple[str, ...] = ()
+    stars: tuple[int, ...] = ()
+    invincible_a: int = 0
+    invincible_b: int = 0
+    star_spawn_due_round: Optional[float] = 20
+    pending_star_spawns: int = 0
+    timeouts_a: int = 0
+    timeouts_b: int = 0
+    food_copy_targets: tuple[tuple[int, int], ...] = ()
+
+    def invincibility(self, side):
+        return self.invincible_a if side in (0, 'A') else self.invincible_b
+
+    @property
+    def star_frenzy(self):
+        return self.remaining_moves <= 100
 
     def terminal_winner(self):
+        if self.timeouts_a >= 10:
+            return 'B'
+        if self.timeouts_b >= 10:
+            return 'A'
         for side, score in enumerate(self.scores):
             if score < ELIMINATION_SCORE_THRESHOLD:
                 return 'B' if side == 0 else 'A'
@@ -54,7 +73,7 @@ class CompactState:
         return None
 
     def is_terminal(self):
-        return self.remaining_moves <= 0 or any(
+        return self.timeouts_a >= 10 or self.timeouts_b >= 10 or self.remaining_moves <= 0 or any(
             score < ELIMINATION_SCORE_THRESHOLD for score in self.scores)
 
 
@@ -88,6 +107,10 @@ class IterativeSearchEngine:
     @classmethod
     def from_game_state(cls, state, time_budget_ms=90, max_depth=6):
         engine = cls(state.rows, state.cols, time_budget_ms, max_depth)
+        return engine, engine.to_compact(state)
+
+    def to_compact(self, state):
+        engine = self
         compact = CompactState(
             rows=state.rows,
             cols=state.cols,
@@ -111,8 +134,18 @@ class IterativeSearchEngine:
             tail_food_b=tuple(sorted(engine.index(cell) for cell in state.tail_food_b)),
             crashed_a=state.crashed_a,
             crashed_b=state.crashed_b,
+            bombs_large=tuple(sorted(engine.index(cell) for cell in state.bombs_large)),
+            bombs_small=tuple(sorted(engine.index(cell) for cell in state.bombs_small)),
+            shot_food=tuple(sorted(engine.index(cell) for cell in state.shot_food)),
+            pending_bomb_respawns=state.pending_bomb_respawns,
+            stars=tuple(sorted(engine.index(cell) for cell in state.stars)),
+            invincible_a=state.invincible_a, invincible_b=state.invincible_b,
+            star_spawn_due_round=state.star_spawn_due_round,
+            pending_star_spawns=state.pending_star_spawns,
+            timeouts_a=state.timeouts_a, timeouts_b=state.timeouts_b,
+            food_copy_targets=tuple(sorted(state.food_copy_targets.items())),
         )
-        return engine, compact
+        return compact
 
     def index(self, cell):
         return cell[0] * self.cols + cell[1]
@@ -125,7 +158,17 @@ class IterativeSearchEngine:
         self.deadline = started + self.time_budget_ms / 1000
         self.root_side = 0 if root_side == 'A' else 1
         self.target = None if target is None else self.index(target)
-        ordered = [direction for direction in self.ordered_moves(state) if direction in legal]
+        # Existing callers pass directions; the action boundary also accepts
+        # authoritative tuples and protocol dictionaries without losing moves.
+        allowed = set()
+        for action in legal:
+            if isinstance(action, dict):
+                action = (action.get('action_type', action.get('action', 'move')), action.get('direction', action.get('data', {}).get('direction')))
+            if isinstance(action, tuple) and action[0] == 'move':
+                action = action[1]
+            allowed.add(action)
+        allowed.update(action for action in self.shoot_actions(state))
+        ordered = [direction for direction in self.ordered_moves(state) if direction in allowed]
         best_scores = {}
         completed_depth = 0
 
@@ -162,7 +205,7 @@ class IterativeSearchEngine:
 
         if state.is_terminal():
             return self.terminal_value(state)
-        moves = self.available_moves(state)
+        moves = self.available_actions(state)
         if not moves:
             return self.terminal_value(state)
         if depth <= 0:
@@ -221,9 +264,13 @@ class IterativeSearchEngine:
         body = state.bodies[state.side]
         if not body:
             return ()
+        if state.invincibility(state.side):
+            # A blocked move is a stationary protected action; a rival contact
+            # is a ram. Both remain one of the four ordinary directions.
+            return tuple(DIRS)
         occupied = self.occupied_mask(state)
         walls = self.mask(state.walls)
-        food = set(state.food) | set(state.tail_food_a if state.side == 0 else state.tail_food_b)
+        food = set(state.food) | set(state.shot_food) | set(state.stars) | set(state.tail_food_a if state.side == 0 else state.tail_food_b)
         moves = []
         for direction in DIRS:
             target = self.target_index(body[0], direction)
@@ -265,115 +312,56 @@ class IterativeSearchEngine:
             return (first, repeated)
         return (replace(first, **{field: None}),)
 
+    def to_game_state(self, state):
+        """Use the authoritative transition engine instead of duplicating rules."""
+        from snake_bot.snake_state import GameState
+        cells = lambda items: frozenset(self.cell(item) for item in items)
+        side = 'A' if state.side == 0 else 'B'
+        return GameState(
+            rows=state.rows, cols=state.cols, board=(), side=side,
+            enemy='B' if side == 'A' else 'A',
+            snakes={name: tuple(self.cell(item) for item in state.bodies[index])
+                    for index, name in enumerate(('A', 'B'))},
+            food=cells(state.food), food_values={self.cell(c): v for c, v in state.food_values},
+            next_food_digit=state.next_food_digit or None, pickups=cells(state.pickups),
+            walls=cells(state.walls), scores=dict(zip(('A', 'B'), state.scores)),
+            multipliers=dict(zip(('A', 'B'), state.multipliers)),
+            remaining_moves=state.remaining_moves,
+            reliable_tails=frozenset(name for i, name in enumerate(('A', 'B')) if state.reliable_tails[i]),
+            tail_food_a=cells(state.tail_food_a), tail_food_b=cells(state.tail_food_b),
+            crashed_a=state.crashed_a, crashed_b=state.crashed_b,
+            bombs_large=cells(state.bombs_large), bombs_small=cells(state.bombs_small),
+            shot_food=cells(state.shot_food), pending_bomb_respawns=state.pending_bomb_respawns,
+            stars=cells(state.stars), invincible_a=state.invincible_a,
+            invincible_b=state.invincible_b, star_spawn_due_round=state.star_spawn_due_round,
+            pending_star_spawns=state.pending_star_spawns,
+            timeouts_a=state.timeouts_a, timeouts_b=state.timeouts_b,
+            food_copy_targets=dict(state.food_copy_targets))
+
+    def apply_action(self, state, action_type, direction):
+        from snake_bot.snake_state import apply_action
+        after = apply_action(self.to_game_state(state), action_type, direction)
+        return self.to_compact(after)
+
     def apply_move(self, state, direction):
-        if state.is_terminal():
-            raise ValueError('Cannot move after the game has ended')
-        side = state.side
-        body = state.bodies[side]
+        if isinstance(direction, tuple):
+            return self.apply_action(state, *direction)
+        return self.apply_action(state, 'move', direction)
+
+    def shoot_actions(self, state):
+        if (state.is_terminal() or state.scores[state.side] < SHOOT_COST
+                or state.invincibility(1 - state.side)):
+            return ()
+        body, rival = state.bodies[state.side], state.bodies[1 - state.side]
         if not body:
-            return state
-        target = self.target_index(body[0], direction)
-        tail_food = state.tail_food_a if side == 0 else state.tail_food_b
-        grows = target in state.food or any(cell == target for cell, _ in state.food_values) or target in tail_food
-        blocked = set(state.walls) | set(state.bodies[0]) | set(state.bodies[1])
-        if not grows:
-            blocked.discard(body[-1])
-        crashes = target is None or target in blocked or (len(body) > 1 and target == body[1])
-        if crashes:
-            scores = list(state.scores)
-            scores[side] = score_after_crash(scores[side],
-                                             state.crashed_a if side == 0 else state.crashed_b)
-            bodies = list(state.bodies)
-            bodies[side] = body[:CRASH_KEEP_LENGTH]
-            detached = set(body[CRASH_KEEP_LENGTH:])
-            reliable = list(state.reliable_tails)
-            reliable[side] = True
-            return replace(
-                state, side=1 - side, bodies=tuple(bodies), scores=tuple(scores),
-                remaining_moves=max(0, state.remaining_moves - 1), reliable_tails=tuple(reliable),
-                walls=self.shrink_wall(state.walls) if side == 1 else state.walls,
-                tail_food_a=tuple(sorted(set(state.tail_food_a) | (detached if side == 1 else set()))),
-                tail_food_b=tuple(sorted(set(state.tail_food_b) | (detached if side == 0 else set()))),
-                crashed_a=True if side == 0 else state.crashed_a,
-                crashed_b=True if side == 1 else state.crashed_b)
-        walls = state.walls
-        hits_wall = target in walls
-        eats = target in state.food
-        food_values = dict(state.food_values)
-        wrong_food = target in food_values and not eats
-        takes_pickup = target in state.pickups
+            return ()
+        return tuple(('shoot', direction) for direction in shoot_directions(
+            self.cell(body[0]), state.rows, state.cols,
+            frozenset(self.cell(cell) for cell in state.walls),
+            tuple(self.cell(cell) for cell in rival)))
 
-        if hits_wall:
-            new_body = body
-        elif grows:
-            new_body = (target,) + body
-        else:
-            new_body = (target,) + body[:-1]
-        bodies = list(state.bodies)
-        bodies[side] = new_body
-
-        scores = list(state.scores)
-        multipliers = list(state.multipliers)
-        if hits_wall:
-            move_score = WALL_HIT_PENALTY
-        elif target in tail_food:
-            move_score = tail_food_reward(multipliers[side])
-        elif eats:
-            digit = food_values.get(target, 1)
-            move_score = food_points(digit, multipliers[side])
-        elif wrong_food:
-            move_score = WRONG_FOOD_PENALTY
-        elif takes_pickup:
-            move_score = MULTIPLIER_PICKUP_SCORE
-            multipliers[side] = max(1, multipliers[side]) + 1
-        else:
-            move_score = NORMAL_SCORE
-        scores[side] += move_score
-
-        next_digit = state.next_food_digit
-        eaten_digit = food_values.get(target)
-        if eats and not hits_wall and eaten_digit is not None:
-            food_values = {
-                cell: digit for cell, digit in food_values.items() if digit != eaten_digit
-            }
-        elif not hits_wall and target in food_values:
-            food_values.pop(target, None)
-        if eats and not hits_wall and next_digit:
-            next_digit = cyclic_digit(next_digit)
-        if food_values:
-            food = tuple(sorted(cell for cell, digit in food_values.items() if digit == next_digit))
-        else:
-            food = tuple(
-                cell for cell in state.food
-                if cell != target and not (
-                    eats and not hits_wall and eaten_digit is not None
-                    and (cell, eaten_digit) in state.food_values
-                )
-            )
-
-        if side == 1:
-            walls = self.shrink_wall(walls)
-        reliable = list(state.reliable_tails)
-        reliable[side] = True
-        return CompactState(
-            rows=state.rows,
-            cols=state.cols,
-            side=1 - side,
-            bodies=(tuple(bodies[0]), tuple(bodies[1])),
-            walls=tuple(walls),
-            food=food,
-            food_values=tuple(sorted(food_values.items())),
-            next_food_digit=next_digit,
-            pickups=tuple(cell for cell in state.pickups if not (takes_pickup and cell == target)),
-            scores=(scores[0], scores[1]),
-            multipliers=(multipliers[0], multipliers[1]),
-            remaining_moves=max(0, state.remaining_moves - 1),
-            reliable_tails=(reliable[0], reliable[1]),
-            tail_food_a=tuple(cell for cell in state.tail_food_a if cell != target),
-            tail_food_b=tuple(cell for cell in state.tail_food_b if cell != target),
-            crashed_a=state.crashed_a,
-            crashed_b=state.crashed_b,
-        )
+    def available_actions(self, state):
+        return tuple(self.available_moves(state)) + self.shoot_actions(state)
 
     def shrink_wall(self, walls):
         if len(walls) <= 1:
@@ -389,7 +377,7 @@ class IterativeSearchEngine:
         return tuple(ordered[1:-1])
 
     def ordered_moves(self, state, moves=None):
-        moves = self.available_moves(state) if moves is None else moves
+        moves = self.available_actions(state) if moves is None else moves
         body = state.bodies[state.side]
         food_values = dict(state.food_values)
         food = set(state.food)
@@ -399,15 +387,23 @@ class IterativeSearchEngine:
         center_col = (self.cols - 1) / 2
 
         def key(direction):
+            if isinstance(direction, tuple):
+                return (0, 0, 0, 0)
             target = self.target_index(body[0], direction)
             if target is None:
                 return (0, 0, 0, -self.size * 100)
-            penalty = target in walls or (target in food_values and target not in food)
+            protected = state.invincibility(state.side) > 0
+            penalty = (target in walls or (target in food_values and target not in food)) and not protected
             reward = 0
             if target in food:
                 reward = 100_000 + food_values.get(target, 1) * 10_000
             elif target in pickups:
                 reward = 15_000 + self.future_food_base_points(state, state.side) * 8
+            elif target in state.stars:
+                reward = 100_000 + 10_000 * state.multipliers[state.side]
+            elif protected and target in state.bodies[1 - state.side]:
+                rival = state.bodies[1 - state.side]
+                reward = max(0, len(rival) - max(1, rival.index(target))) * 10_000
             row, col = self.cell(target)
             center = -int((abs(row - center_row) + abs(col - center_col)) * 100)
             target_progress = 0
@@ -421,7 +417,8 @@ class IterativeSearchEngine:
     def terminal_value(self, state):
         if not state.is_terminal():
             return self.evaluate(state)
-        if any(score < ELIMINATION_SCORE_THRESHOLD for score in state.scores):
+        if (state.timeouts_a >= 10 or state.timeouts_b >= 10
+                or any(score < ELIMINATION_SCORE_THRESHOLD for score in state.scores)):
             winner = state.terminal_winner()
             root = 'A' if self.root_side == 0 else 'B'
             delta = state.scores[self.root_side] - state.scores[1 - self.root_side]
@@ -466,8 +463,43 @@ class IterativeSearchEngine:
             root_distance = self.manhattan(state.bodies[root][0], self.target)
             enemy_distance = self.manhattan(state.bodies[enemy][0], self.target)
             value += (enemy_distance - root_distance) * 250
+        if state.stars or state.invincible_a or state.invincible_b:
+            value += (self.star_position_value(state, root)
+                      - self.star_position_value(state, enemy)) * 22
         self.evaluations[state] = value
         return value
+
+    def star_position_value(self, state, side):
+        """Price visible protection/ram opportunities on the existing point scale."""
+        body, rival = state.bodies[side], state.bodies[1 - side]
+        if not body or not rival:
+            return 0
+        turns = max(0, (state.remaining_moves + (side == state.side)) // 2)
+        duration = min(state.invincibility(side), turns)
+        nearest = min(self.manhattan(body[0], cell) for cell in rival)
+        # Protection can avoid a first-crash wipe; ramming exposes the detached
+        # cells' real 100*mult reward. Distance and the actual own-turn horizon
+        # bound both rather than granting a fixed star bonus.
+        history = state.crashed_a if side == 0 else state.crashed_b
+        loss = max(0, state.scores[side]) if history is False else 500
+        cut_food = max(0, len(rival) - 1) * 100 * state.multipliers[side]
+        points = (loss + cut_food) * duration // (STAR_TURNS * max(1, nearest))
+        if not state.stars or turns <= 0:
+            return points
+        best = 0
+        for star in state.stars:
+            ours = self.manhattan(body[0], star)
+            theirs = self.manhattan(rival[0], star)
+            # Own-turn distances with the alternating side resolving ties.
+            if (ours > turns or (not state.star_frenzy and
+                    (ours > theirs or (ours == theirs and side != state.side)))):
+                continue
+            protected_after = max(0, state.invincibility(side) - ours)
+            extra = max(0, min(STAR_TURNS, turns - ours) - protected_after)
+            benefit = (loss + cut_food) * extra // (STAR_TURNS * max(1, nearest))
+            immediate = 100 * state.multipliers[side]
+            best = max(best, (immediate + benefit) // max(1, ours))
+        return points + best
 
     def future_food_base_points(self, state, side):
         if not state.food_values or not state.next_food_digit:
@@ -489,35 +521,22 @@ class IterativeSearchEngine:
             return ()
         food = set(state.food)
         wrong = {cell for cell, _digit in state.food_values if cell not in food}
+        if state.invincibility(side):
+            wrong.clear()
         walls = set(state.walls)
         return tuple(
             direction for direction in moves
             if self.target_index(body[0], direction) not in walls
             and self.target_index(body[0], direction) not in wrong
+            and (not state.invincibility(side) or (
+                self.target_index(body[0], direction) is not None
+                and self.target_index(body[0], direction) not in body))
         )
 
     def legal_moves_for(self, state, side):
         if side == state.side:
             return self.legal_moves(state)
-        swapped = CompactState(
-            rows=state.rows,
-            cols=state.cols,
-            side=side,
-            bodies=state.bodies,
-            walls=state.walls,
-            food=state.food,
-            food_values=state.food_values,
-            next_food_digit=state.next_food_digit,
-            pickups=state.pickups,
-            scores=state.scores,
-            multipliers=state.multipliers,
-            remaining_moves=state.remaining_moves,
-            reliable_tails=state.reliable_tails,
-            tail_food_a=state.tail_food_a,
-            tail_food_b=state.tail_food_b,
-            crashed_a=state.crashed_a,
-            crashed_b=state.crashed_b,
-        )
+        swapped = replace(state, side=side)
         return self.legal_moves(swapped)
 
     def expand(self, bits):
@@ -532,7 +551,8 @@ class IterativeSearchEngine:
         if not body:
             return 0
         start = 1 << body[0]
-        wrong_food = tuple(cell for cell, _digit in state.food_values if cell not in state.food)
+        wrong_food = (() if state.invincibility(side) else
+                      tuple(cell for cell, _digit in state.food_values if cell not in state.food))
         blocked = (self.occupied_mask(state) | self.mask(wrong_food)) & ~start
         seen = start
         frontier = start

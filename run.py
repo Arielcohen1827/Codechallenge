@@ -102,7 +102,7 @@ def diagnostic_call(function, *args, **kwargs):
         return None
 
 
-def log_verification(game_id, data, direction=None, finished=False, debug=None):
+def log_verification(game_id, data, direction=None, finished=False, debug=None, action_type='move'):
     try:
         previous = None
         for line in reversed(HISTORY.get(game_id, ())):
@@ -111,7 +111,7 @@ def log_verification(game_id, data, direction=None, finished=False, debug=None):
                 if previous:
                     break
         record = verification_record(data, BOT.observed_states.get(str(game_id)),
-                                     previous, direction, finished)
+                                     previous, direction, finished, action_type=action_type)
         if finished:
             # Attach to the existing event to preserve the protocol log order.
             last_line = HISTORY[game_id][-1]
@@ -138,7 +138,7 @@ def write_game_log(game_id):
         print_diagnostic(f"could not write game log: {type(e).__name__}")
 
 
-def write_live_snapshot(game_id, data, status='playing', decision=None, direction=None):
+def write_live_snapshot(game_id, data, status='playing', decision=None, direction=None, action_type='move'):
     """Publish the latest server board for the local live viewer."""
     try:
         LIVE_DIR.mkdir(parents=True, exist_ok=True)
@@ -174,6 +174,7 @@ def write_live_snapshot(game_id, data, status='playing', decision=None, directio
             'turn_data': safe_data(data),
             'decision': safe_message(decision) if decision else None,
             'direction': direction,
+            'action_type': action_type,
         }
         path = LIVE_DIR / f'game_{safe_id}.json'
         temporary = path.with_suffix('.tmp')
@@ -250,6 +251,7 @@ async def on_game_over(websocket, request_data):
                 status='finished',
                 decision=decision,
                 direction=(decision or {}).get('direction'),
+                action_type=(decision or {}).get('action_type', 'move'),
             )
         finally:
             LIVE_STARTED_AT.pop(game_id, None)
@@ -321,10 +323,37 @@ async def on_your_turn(websocket, request_data):
     await process_your_turn(websocket, request_data)
 
 
+async def on_play_data(websocket, request_data):
+    """Receive observations, never a turn permission or a request to send."""
+    raw = request_data.get('data', {})
+    game_id = raw.get('game_id')
+    if game_id is None:
+        return
+    diagnostic_call(log_event, game_id, request_data)
+    data = dict(raw)
+    for key in ('action', 'action_type', 'direction'):
+        value = request_data.get(key)
+        allowed = ('up', 'down', 'left', 'right') if key == 'direction' else ('move', 'shoot')
+        if key not in data and value in allowed:
+            data[key] = value
+    complete = (isinstance(data.get('board'), str) and data.get('side') is not None
+                and isinstance(data.get('remaining_moves'), int)
+                and all(any(isinstance(data.get(key), (int, float)) for key in keys)
+                        for keys in (('score_1', 'score_A'), ('score_2', 'score_B'))))
+    if not complete:
+        return
+    state = BOT.observe_state(data)
+    log_verification(game_id, data)
+    if state is not None:
+        diagnostic_call(write_live_snapshot, game_id, data,
+                        action_type=data.get('action', data.get('action_type')))
+
+
 HANDLERS = {
     'game_over': on_game_over,
     'challenge': on_challenge,
     'your_turn': on_your_turn,
+    'play_data': on_play_data,
 }
 
 
@@ -361,11 +390,24 @@ async def process_your_turn(websocket, request_data):
 async def process_move(websocket, request_data):
     data = request_data['data']
     diagnostic_call(print_diagnostic, data.get('board', ''))
-    direction = BOT.choose_move(data)
-    if direction is None:
+    action = BOT.choose_action(data)
+    if action is None:
         return
-    direction = BOT.safe_direction(data, direction)
+    action = BOT.safe_action(data, action)
+    if action is None:
+        return
+    direction = action['direction']
+    action_type = action['action_type']
+    # Last boundary guard also covers a future/custom safe_action policy.
+    if action_type == 'shoot':
+        state = parse_state(data)
+        if state.scores[state.side] < 5000:
+            action_type = 'move'
+            direction = BOT.safe_direction(data, direction)
+            action = {'action_type': action_type, 'direction': direction}
     debug = BOT.decision_debug(data['game_id'])
+    if debug is not None:
+        debug = {**debug, 'action_type': action_type, 'direction': direction}
     move = {
         'game_id': data['game_id'],
         'turn_token': data['turn_token'],
@@ -376,11 +418,13 @@ async def process_move(websocket, request_data):
         data,
         decision=debug,
         direction=direction,
+        action_type=action_type,
     )
-    await send(websocket, 'move', move)
-    log_verification(move['game_id'], data, direction, debug=debug)
-    diagnostic_call(log_action, move['game_id'], {'action': 'move', 'data': move})
-    BOT.commit_move(data, direction)
+    await send(websocket, action_type, move)
+    log_verification(move['game_id'], data, direction, debug=debug, action_type=action_type)
+    diagnostic_call(log_action, move['game_id'], {
+        'action': action_type, 'action_type': action_type, 'data': move})
+    BOT.commit_action(data, action)
 
 
 async def process_wall(websocket, request_data):

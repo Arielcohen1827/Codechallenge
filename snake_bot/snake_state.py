@@ -16,6 +16,17 @@ from snake_bot.game_rules import (
     food_points,
     score_after_crash,
     tail_food_reward,
+    BOMB_EXPIRY_MOVES,
+    within_blast_zone,
+    score_after_bomb,
+    shot_food_reward,
+    SHOOT_COST,
+    INVALID_ACTION_PENALTY,
+    first_shot_hit,
+    bombs_active_on_turn,
+    blast_zone_cells,
+    STAR_TURNS, STAR_RESPAWN_ROUNDS, STAR_FRENZY_COUNT, MAX_TIMEOUTS,
+    star_spawn_candidates as eligible_star_cells,
 )
 
 
@@ -53,8 +64,31 @@ class GameState:
     tail_food_b: frozenset[tuple[int, int]] = frozenset()
     crashed_a: bool | None = None
     crashed_b: bool | None = None
+    bombs_large: frozenset[tuple[int, int]] = frozenset()
+    bombs_small: frozenset[tuple[int, int]] = frozenset()
+    shot_food: frozenset[tuple[int, int]] = frozenset()
+    pending_bomb_respawns: tuple[str, ...] = ()
+    last_action: dict = field(default_factory=dict, compare=False)
+    stars: frozenset[tuple[int, int]] = frozenset()
+    invincible_a: int = 0
+    invincible_b: int = 0
+    star_spawn_due_round: float | None = STAR_RESPAWN_ROUNDS
+    pending_star_spawns: int = 0
+    timeouts_a: int = 0
+    timeouts_b: int = 0
+
+    def invincibility(self, side):
+        return self.invincible_a if side == 'A' else self.invincible_b
+
+    @property
+    def star_frenzy(self):
+        return self.remaining_moves <= BOMB_EXPIRY_MOVES
 
     def terminal_winner(self):
+        if self.timeouts_a >= MAX_TIMEOUTS:
+            return 'B'
+        if self.timeouts_b >= MAX_TIMEOUTS:
+            return 'A'
         for side in ('A', 'B'):
             if self.scores.get(side, 0) < ELIMINATION_SCORE_THRESHOLD:
                 return 'B' if side == 'A' else 'A'
@@ -64,7 +98,7 @@ class GameState:
         return None
 
     def is_terminal(self):
-        return self.remaining_moves <= 0 or any(
+        return max(self.timeouts_a, self.timeouts_b) >= MAX_TIMEOUTS or self.remaining_moves <= 0 or any(
             score < ELIMINATION_SCORE_THRESHOLD for score in self.scores.values())
 
     def head(self, side):
@@ -84,7 +118,7 @@ class GameState:
         return frozenset(set(self.food_values) - set(self.food))
 
     def objective_cells(self):
-        return frozenset(set(self.food) | set(self.pickups))
+        return frozenset(set(self.food) | set(self.pickups) | set(self.shot_food) | set(self.stars))
 
     def food_reward(self, side, pos):
         digit = self.food_values.get(pos)
@@ -158,7 +192,7 @@ def parse_state(data, previous_snakes=None, crash_history=None):
         'A': int(data.get('score_1', data.get('score_A', 0)) or 0),
         'B': int(data.get('score_2', data.get('score_B', 0)) or 0),
     }
-    legacy_food = frozenset(
+    shot_food = frozenset(
         (r, c)
         for r, row in enumerate(board)
         for c, ch in enumerate(row)
@@ -178,7 +212,8 @@ def parse_state(data, previous_snakes=None, crash_history=None):
     numbered_target = {
         pos for pos, digit in food_values.items() if digit == next_food_digit
     }
-    food = frozenset(numbered_target if food_values else legacy_food)
+    # v9 '*' is unsequenced shot food, even when no numeric food remains.
+    food = frozenset(numbered_target)
     pickups = frozenset(
         (r, c)
         for r, row in enumerate(board)
@@ -191,18 +226,26 @@ def parse_state(data, previous_snakes=None, crash_history=None):
         for c, ch in enumerate(row)
         if ch == '#'
     )
+    invincible = {
+        'A': max(0, int(data.get('invincible_1', data.get('invincible_A', 0)) or 0)),
+        'B': max(0, int(data.get('invincible_2', data.get('invincible_B', 0)) or 0)),
+    }
     snakes = {
-        'A': reconstruct_snake(board, 'A'),
-        'B': reconstruct_snake(board, 'B'),
+        'A': reconstruct_snake(board, 'A', invincible['A']),
+        'B': reconstruct_snake(board, 'B', invincible['B']),
     }
     reliable = set()
     if previous_snakes:
         for snake_side in ('A', 'B'):
-            tracked = track_snake(previous_snakes.get(snake_side, ()), board, snake_side)
+            tracked = track_snake(previous_snakes.get(snake_side, ()), board, snake_side,
+                                  invincible[snake_side])
             if tracked is not None:
                 snakes[snake_side] = tracked
                 reliable.add(snake_side)
 
+    remaining_moves = int(data.get('remaining_moves', MAX_MOVES) or 0)
+    stars = frozenset((r, c) for r, row in enumerate(board)
+                      for c, ch in enumerate(row) if ch == '\u2b50')
     return GameState(
         rows=rows,
         cols=cols,
@@ -212,7 +255,7 @@ def parse_state(data, previous_snakes=None, crash_history=None):
         snakes=snakes,
         food=food,
         scores=scores,
-        remaining_moves=int(data.get('remaining_moves', MAX_MOVES) or 0),
+        remaining_moves=remaining_moves,
         reliable_tails=frozenset(reliable),
         food_values=food_values,
         next_food_digit=next_food_digit,
@@ -229,6 +272,23 @@ def parse_state(data, previous_snakes=None, crash_history=None):
                               for c, ch in enumerate(row) if ch == '\u24b7'),
         crashed_a=(crash_history or {}).get('A'),
         crashed_b=(crash_history or {}).get('B'),
+        bombs_large=frozenset((r, c) for r, row in enumerate(board)
+                               for c, ch in enumerate(row) if ch == '💣')
+                    if remaining_moves > BOMB_EXPIRY_MOVES else frozenset(),
+        bombs_small=frozenset((r, c) for r, row in enumerate(board)
+                               for c, ch in enumerate(row) if ch == '🧨')
+                    if remaining_moves > BOMB_EXPIRY_MOVES else frozenset(),
+        shot_food=shot_food,
+        stars=stars,
+        pending_star_spawns=(max(0, STAR_FRENZY_COUNT - len(stars))
+                             if remaining_moves <= BOMB_EXPIRY_MOVES else 0),
+        invincible_a=invincible['A'], invincible_b=invincible['B'],
+        # A zero-counter midgame snapshot cannot reveal the previous expiry
+        # round. Do not fabricate the next server star's deadline.
+        star_spawn_due_round=(STAR_RESPAWN_ROUNDS if remaining_moves >= MAX_MOVES -
+                              2 * STAR_RESPAWN_ROUNDS and not any(invincible.values()) else None),
+        timeouts_a=max(0, int(data.get('timeouts_1', data.get('timeouts_A', 0)) or 0)),
+        timeouts_b=max(0, int(data.get('timeouts_2', data.get('timeouts_B', 0)) or 0)),
     )
 
 
@@ -243,13 +303,14 @@ def normalize_side(raw_side, board):
     return 'A'
 
 
-def reconstruct_snake(board, side):
+def reconstruct_snake(board, side, invincible=0):
     head = None
     cells = set()
-    body_char = side.lower()
+    head_char = side.lower() if invincible else side
+    body_char = side if invincible else side.lower()
     for r, row in enumerate(board):
         for c, ch in enumerate(row):
-            if ch == side:
+            if ch == head_char:
                 head = (r, c)
                 cells.add((r, c))
             elif ch == body_char:
@@ -279,9 +340,9 @@ def reconstruct_snake(board, side):
     return tuple(ordered)
 
 
-def track_snake(previous, board, side):
+def track_snake(previous, board, side, invincible=0):
     cells = snake_cells(board, side)
-    head = snake_head(board, side)
+    head = snake_head(board, side, invincible)
     if head is None or not cells:
         return ()
     if not previous or not previous[0]:
@@ -291,6 +352,11 @@ def track_snake(previous, board, side):
     # Its own already-committed body is therefore often unchanged verbatim.
     if head == previous[0] and len(previous) == len(cells) and set(previous) == cells:
         return tuple(previous)
+
+    # A shot can remove any suffix while leaving the head stationary.
+    prefix = tuple(previous[:len(cells)])
+    if head == previous[0] and set(prefix) == cells:
+        return prefix
 
     kept = tuple(previous[:CRASH_KEEP_LENGTH])
     if head == previous[0] and len(kept) == len(cells) and set(kept) == cells:
@@ -320,10 +386,11 @@ def snake_cells(board, side):
     }
 
 
-def snake_head(board, side):
+def snake_head(board, side, invincible=0):
+    head_char = side.lower() if invincible else side
     for r, row in enumerate(board):
         for c, ch in enumerate(row):
-            if ch == side:
+            if ch == head_char:
                 return (r, c)
     return None
 
@@ -361,9 +428,9 @@ def in_bounds(state, pos):
     return 0 <= pos[0] < state.rows and 0 <= pos[1] < state.cols
 
 
-def strategic_blocked(state):
+def strategic_blocked(state, side=None):
     """Cells that are unusable without crashing or paying a score penalty."""
-    return state.occupied() | set(state.wrong_food())
+    return state.occupied() | (set() if state.invincibility(side or state.side) else set(state.wrong_food()))
 
 
 def legal_moves(state, side=None):
@@ -371,6 +438,9 @@ def legal_moves(state, side=None):
     snake = state.body(side)
     if not snake:
         return []
+    if state.invincibility(side):
+        # Rams and harmless stationary impacts are the same four move actions.
+        return list(DIRS)
     occupied = state.occupied()
     legal = []
     for direction in DIRS:
@@ -382,7 +452,7 @@ def legal_moves(state, side=None):
         if target in state.walls:
             legal.append(direction)
             continue
-        eats = target in state.food or target in (
+        eats = target in state.food or target in state.shot_food or target in state.stars or target in (
             state.tail_food_a if side == 'A' else state.tail_food_b)
         blocked = set(occupied)
         if not eats and side in state.reliable_tails:
@@ -409,7 +479,197 @@ def available_moves(state, side=None):
             if len(body) < 2 or step(body[0], direction) != body[1]]
 
 
+def available_actions(state, side=None):
+    side = side or state.side
+    actions = [('move', direction) for direction in available_moves(state, side)]
+    if not state.is_terminal() and state.body(side) and state.scores.get(side, 0) >= SHOOT_COST:
+        actions.extend(('shoot', direction) for direction in DIRS)
+    return actions
+
+
+def apply_action(state, action_type, direction, side=None):
+    if action_type == 'move':
+        return apply_move(state, direction, side)
+    if action_type == 'shoot':
+        return apply_shoot(state, direction, side)
+    return apply_invalid_action(state, action_type, direction, side)
+
+
+def apply_invalid_action(state, action_type='invalid', direction=None, side=None):
+    """Invalid actions/timeouts spend a turn without ever becoming a v7 crash."""
+    if state.is_terminal():
+        raise ValueError('Cannot act after the game has ended')
+    side = side or state.side
+    scores = dict(state.scores)
+    before = scores.get(side, 0)
+    scores[side] = before + (0 if state.invincibility(side) else INVALID_ACTION_PENALTY)
+    metadata = action_metadata(action_type, direction, before, scores[side])
+    metadata['valid'] = False
+    after = stationary_turn(state, side, scores=scores)
+    if action_type == 'timeout':
+        name = 'timeouts_a' if side == 'A' else 'timeouts_b'
+        after = replace(after, **{name: getattr(state, name) + 1})
+    return finish_v10_turn(state, after, side, metadata)
+
+
+def stationary_turn(state, side, **changes):
+    return replace(state, side='B' if side == 'A' else 'A', enemy=side,
+                   remaining_moves=max(0, state.remaining_moves - 1),
+                   reliable_tails=state.reliable_tails | {side},
+                   walls=shrink_wall(state.walls) if side == 'B' else state.walls,
+                   **changes)
+
+
+def apply_shoot(state, direction, side=None):
+    """Spend a stationary turn; enemy cuts never count as crashes."""
+    state = expire_bombs(state)
+    if state.is_terminal():
+        raise ValueError('Cannot shoot after the game has ended')
+    side = side or state.side
+    if not state.body(side):
+        return state
+    if direction not in DIRS:
+        return apply_invalid_action(state, 'shoot', direction, side)
+    rival_side = 'B' if side == 'A' else 'A'
+    before = state.scores.get(side, 0)
+    valid = before >= SHOOT_COST
+    scores = dict(state.scores)
+    scores[side] = before - SHOOT_COST if valid else before + (
+        0 if state.invincibility(side) else INVALID_ACTION_PENALTY)
+    metadata = action_metadata('shoot', direction, before, scores[side])
+    metadata.update(valid=valid, shoot_cost=SHOOT_COST if valid else 0)
+    snakes = dict(state.snakes)
+    generated = frozenset()
+    if valid:
+        rival = state.body(rival_side)
+        hit = first_shot_hit(state.head(side), DIRS[direction], state.rows,
+                             state.cols, state.walls, rival)
+        if hit is not None:
+            metadata.update(hit=True, hit_coordinate=hit)
+            if state.invincibility(rival_side):
+                metadata['shot_blocked_by_invincibility'] = True
+            else:
+                snakes, generated, cut_length = cut_rival(state, rival_side, hit)
+                metadata.update(cut_length=cut_length, shot_food_generated=sorted(generated))
+    after = replace(
+        state, snakes=snakes, scores=scores,
+        side=rival_side, enemy=side,
+        shot_food=state.shot_food | generated,
+        remaining_moves=max(0, state.remaining_moves - 1),
+        reliable_tails=state.reliable_tails | {side},
+        walls=shrink_wall(state.walls) if side == 'B' else state.walls,
+        last_action=metadata)
+    return finish_v10_turn(state, after, side, metadata)
+
+
+def cut_rival(state, rival_side, hit):
+    """One common suffix-cut operation for shooting and invincible ramming."""
+    rival = state.body(rival_side)
+    cut_index = max(1, rival.index(hit))
+    detached = rival[cut_index:]
+    snakes = dict(state.snakes)
+    snakes[rival_side] = rival[:cut_index]
+    generated = frozenset(cell for cell in detached if not within_blast_zone(
+        cell, state.bombs_large, state.bombs_small))
+    return snakes, generated, len(detached)
+
+
 def apply_move(state, direction, side=None):
+    """Resolve v7 movement/content, then v8 detonation and end-turn expiry."""
+    state = expire_bombs(state)
+    side = side or state.side
+    if not state.body(side):
+        if state.is_terminal():
+            raise ValueError('Cannot move after the game has ended')
+        return state
+    if direction not in DIRS:
+        return apply_invalid_action(state, 'move', direction, side)
+    before = state.scores.get(side, 0)
+    after = _apply_move(state, direction, side)
+    metadata = action_metadata('move', direction, before, after.scores.get(side, 0))
+    if after.last_action is not state.last_action:
+        metadata.update(after.last_action)
+    moved = after.head(side) != state.head(side)
+    if moved:
+        head = after.head(side)
+        large = frozenset(bomb for bomb in state.bombs_large
+                          if within_blast_zone(head, (bomb,), ()))
+        small = frozenset(bomb for bomb in state.bombs_small
+                          if within_blast_zone(head, (), (bomb,)))
+        if large or small:
+            scores = dict(after.scores)
+            scores[side] = before if state.invincibility(side) else score_after_bomb(before)
+            kinds = ('large',) * len(large) + ('small',) * len(small)
+            after = replace(after, scores=scores,
+                            bombs_large=state.bombs_large - large,
+                            bombs_small=state.bombs_small - small,
+                            pending_bomb_respawns=state.pending_bomb_respawns + kinds)
+            metadata.update(bomb_triggered=True,
+                            bomb_types=sorted(set(kinds)),
+                            bomb_type='large+small' if large and small else
+                                      'large' if large else 'small',
+                            bomb_positions=sorted(large | small), score_after=scores[side])
+    metadata['star_consumed'] = moved and after.head(side) in state.stars
+    return finish_v10_turn(state, after, side, metadata)
+
+
+def finish_v10_turn(before, after, side, metadata):
+    """Protection applies to the current action; only its actor spends a turn."""
+    counter = STAR_TURNS if metadata.get('star_consumed') else max(0, before.invincibility(side) - 1)
+    name = 'invincible_a' if side == 'A' else 'invincible_b'
+    next_a = counter if side == 'A' else after.invincible_a
+    next_b = counter if side == 'B' else after.invincible_b
+    due = before.star_spawn_due_round
+    if after.star_frenzy:
+        due = None
+        pending = max(0, STAR_FRENZY_COUNT - len(after.stars))
+    elif next_a or next_b:
+        due, pending = None, 0
+    else:
+        if before.invincible_a or before.invincible_b:
+            # Preserve half-round phase: expiry after A must wait the same
+            # forty alternating actions as expiry after B, never just39.
+            due = (MAX_MOVES - after.remaining_moves) / 2 + STAR_RESPAWN_ROUNDS
+        ready = due is not None and (MAX_MOVES - after.remaining_moves) / 2 >= due
+        pending = int(ready and not after.stars)
+    metadata.update(invincibility_before=before.invincibility(side),
+                    invincibility_after=counter, frenzy=after.star_frenzy)
+    return expire_bombs(replace(after, star_spawn_due_round=due,
+                               pending_star_spawns=pending, last_action=metadata,
+                               **{name: counter}))
+
+
+def star_spawn_candidates(state):
+    """Do not invent a normal star during protection, or a chosen RNG cell."""
+    if not state.star_frenzy and (state.invincible_a or state.invincible_b or state.stars):
+        return ()
+    edible = (set(state.food) | set(state.food_values) | set(state.pickups) |
+              set(state.shot_food) | set(state.tail_food_a) | set(state.tail_food_b) | set(state.stars))
+    return eligible_star_cells(state.rows, state.cols, (state.head('A'), state.head('B')),
+                               state.occupied(), edible, state.bombs_large,
+                               state.bombs_small, state.star_frenzy)
+
+
+def expire_bombs(state):
+    if state.remaining_moves <= BOMB_EXPIRY_MOVES and (
+            state.bombs_large or state.bombs_small or state.pending_bomb_respawns):
+        return replace(state, bombs_large=frozenset(), bombs_small=frozenset(),
+                       pending_bomb_respawns=())
+    return state
+
+
+def action_metadata(action_type, direction, before, after):
+    """Local prediction only; the next server snapshot is authoritative."""
+    return dict(action_type=action_type, direction=direction, shoot_cost=0,
+                hit=False, hit_coordinate=None, cut_length=0,
+                shot_food_generated=[], bomb_triggered=False, bomb_type=None, bomb_types=[],
+                score_before=before, score_after=after, prediction=True,
+                star_consumed=False, invincibility_before=0, invincibility_after=0,
+                ram_cut=False, ram_hit_coordinate=None,
+                shot_blocked_by_invincibility=False, frenzy=False)
+
+
+def _apply_move(state, direction, side=None):
     if state.is_terminal():
         raise ValueError('Cannot move after the game has ended')
     side = side or state.side
@@ -417,8 +677,20 @@ def apply_move(state, direction, side=None):
     if not snake:
         return state
     target = step(snake[0], direction)
+    protected = bool(state.invincibility(side))
+    if protected and (not in_bounds(state, target) or target in state.occupied()):
+        rival_side = 'B' if side == 'A' else 'A'
+        metadata = action_metadata('move', direction, state.scores.get(side, 0), state.scores.get(side, 0))
+        changes = {}
+        if target in state.body(rival_side):
+            snakes, generated, cut_length = cut_rival(state, rival_side, target)
+            changes.update(snakes=snakes, shot_food=state.shot_food | generated)
+            metadata.update(ram_cut=True, ram_hit_coordinate=target,
+                            cut_length=cut_length, shot_food_generated=sorted(generated))
+        return stationary_turn(state, side, last_action=metadata, **changes)
     tail_food = state.tail_food_a if side == 'A' else state.tail_food_b
-    grows = target in state.food or target in state.food_values or target in tail_food
+    grows = (target in state.food or target in state.food_values or target in tail_food
+             or target in state.shot_food or target in state.stars)
     blocked = state.occupied()
     if not grows:
         blocked.discard(snake[-1])
@@ -432,7 +704,8 @@ def apply_move(state, direction, side=None):
                                          state.crashed_a if side == 'A' else state.crashed_b)
         snakes = dict(state.snakes)
         snakes[side] = snake[:CRASH_KEEP_LENGTH]
-        detached = frozenset(snake[CRASH_KEEP_LENGTH:])
+        detached = frozenset(cell for cell in snake[CRASH_KEEP_LENGTH:]
+                             if not within_blast_zone(cell, state.bombs_large, state.bombs_small))
         return replace(
             state, snakes=snakes, scores=scores,
             side='B' if side == 'A' else 'A', enemy=side,
@@ -444,7 +717,9 @@ def apply_move(state, direction, side=None):
             crashed_a=True if side == 'A' else state.crashed_a,
             crashed_b=True if side == 'B' else state.crashed_b)
     hits_wall = target in state.walls
-    eats = target in state.food
+    eats_shot = target in state.shot_food
+    eats_star = target in state.stars
+    eats = target in state.food and not eats_shot
     wrong_food = target in state.food_values and not eats
     takes_pickup = target in state.pickups
     if hits_wall:
@@ -460,10 +735,14 @@ def apply_move(state, direction, side=None):
         move_score = WALL_HIT_PENALTY
     elif target in tail_food:
         move_score = tail_food_reward(multipliers.get(side, 1))
+    elif eats_shot:
+        move_score = shot_food_reward(multipliers.get(side, 1))
+    elif eats_star:
+        move_score = FOOD_SCORE * multipliers.get(side, 1)
     elif eats:
         move_score = state.food_reward(side, target)
     elif wrong_food:
-        move_score = WRONG_FOOD_PENALTY
+        move_score = 0 if protected else WRONG_FOOD_PENALTY
     elif takes_pickup:
         move_score = MULTIPLIER_PICKUP_SCORE
         multipliers[side] = max(1, multipliers.get(side, 1)) + 1
@@ -517,6 +796,18 @@ def apply_move(state, direction, side=None):
         tail_food_b=state.tail_food_b - {target},
         crashed_a=state.crashed_a,
         crashed_b=state.crashed_b,
+        bombs_large=state.bombs_large,
+        bombs_small=state.bombs_small,
+        shot_food=state.shot_food - {target},
+        pending_bomb_respawns=state.pending_bomb_respawns,
+        stars=state.stars - {target},
+        invincible_a=state.invincible_a,
+        invincible_b=state.invincible_b,
+        star_spawn_due_round=state.star_spawn_due_round,
+        pending_star_spawns=state.pending_star_spawns,
+        timeouts_a=state.timeouts_a,
+        timeouts_b=state.timeouts_b,
+        last_action={},
     )
 
 
@@ -537,7 +828,8 @@ def shrink_wall(walls):
 
 def blocked_for_path(state, side):
     blocked = state.occupied()
-    blocked.update(state.wrong_food())
+    if not state.invincibility(side):
+        blocked.update(state.wrong_food())
     snake = state.body(side)
     if snake:
         blocked.discard(snake[0])
@@ -570,16 +862,18 @@ def release_times(state):
     return releases
 
 
-def temporal_shortest_path(state, start, goal, side, max_time=None):
+def temporal_shortest_path(state, start, goal, side, max_time=None, avoid_blast=False):
     if start is None or goal is None:
         return None
     if start == goal:
         return (start,)
 
+    blast_cells = blast_zone_cells(state.rows, state.cols, state.bombs_large, state.bombs_small) if avoid_blast else None
     snake = state.body(side)
     blocked_release = release_times(state)
-    for cell in state.wrong_food():
-        if cell != goal:
+    wrong = state.wrong_food()
+    for cell in wrong:
+        if cell != goal and not state.invincibility(side):
             blocked_release[cell] = NEVER_RELEASE
     blocked_release[start] = 0
     max_time = max_time or state.rows * state.cols
@@ -594,12 +888,16 @@ def temporal_shortest_path(state, start, goal, side, max_time=None):
             continue
         for nb in neighbors(current, state.rows, state.cols):
             next_time = time + 1
+            if nb in parent:
+                continue
+            if nb in wrong and nb != goal and state.invincibility(side) < next_time:
+                continue
+            if avoid_blast and path_blast_blocked(state, nb, side, next_time, blast_cells):
+                continue
             if time == 0 and len(snake) > 1 and nb == snake[1]:
                 continue
             release_time = blocked_release.get(nb, 0)
             if release_time > next_time:
-                continue
-            if nb in parent:
                 continue
             parent[nb] = current
             distance[nb] = next_time
@@ -619,15 +917,17 @@ def temporal_shortest_distance(state, start, goal, side, max_time=None):
     return None if path is None else len(path) - 1
 
 
-def temporal_distance_map(state, start, side, max_time=None, goals=()):
+def temporal_distance_map(state, start, side, max_time=None, goals=(), avoid_blast=False):
     """Compute temporal distances once when several goals share a board."""
     if start is None:
         return {}
+    blast_cells = blast_zone_cells(state.rows, state.cols, state.bombs_large, state.bombs_small) if avoid_blast else None
     snake = state.body(side)
     blocked_release = release_times(state)
     goals = frozenset(goals)
-    for cell in state.wrong_food():
-        if cell not in goals:
+    wrong = state.wrong_food()
+    for cell in wrong:
+        if cell not in goals and not state.invincibility(side):
             blocked_release[cell] = NEVER_RELEASE
     blocked_release[start] = 0
     max_time = max_time or state.rows * state.cols
@@ -640,19 +940,37 @@ def temporal_distance_map(state, start, side, max_time=None, goals=()):
             continue
         for nb in neighbors(current, state.rows, state.cols):
             next_time = time + 1
+            if nb in distances:
+                continue
+            if nb in wrong and nb not in goals and state.invincibility(side) < next_time:
+                continue
+            if avoid_blast and path_blast_blocked(state, nb, side, next_time, blast_cells):
+                continue
             if time == 0 and len(snake) > 1 and nb == snake[1]:
                 continue
-            if blocked_release.get(nb, 0) > next_time or nb in distances:
+            if blocked_release.get(nb, 0) > next_time:
                 continue
             distances[nb] = next_time
             q.append(nb)
     return distances
 
 
-def shortest_path(state, start, goal, side):
+def path_blast_blocked(state, cell, side, move_number, blast_cells=None):
+    if state.invincibility(side) >= move_number:
+        return False
+    if not bombs_active_on_turn(state.remaining_moves, side == state.side, move_number):
+        return False
+    return (cell in blast_cells if blast_cells is not None else
+            within_blast_zone(cell, state.bombs_large, state.bombs_small))
+
+
+def shortest_path(state, start, goal, side, avoid_blast=False):
+    blast_cells = blast_zone_cells(state.rows, state.cols, state.bombs_large, state.bombs_small) if avoid_blast else None
     blocked = blocked_for_path(state, side)
     q = deque([start])
     parent = {start: None}
+    wrong = state.wrong_food()
+    distance = {start: 0} if avoid_blast or (state.invincibility(side) and wrong) else None
     blocked.discard(start)
     while q:
         current = q.popleft()
@@ -664,7 +982,13 @@ def shortest_path(state, start, goal, side):
             return tuple(reversed(path))
         for nb in neighbors(current, state.rows, state.cols):
             if nb not in parent and nb not in blocked:
+                if nb in wrong and distance is not None and state.invincibility(side) < distance[current] + 1:
+                    continue
+                if avoid_blast and path_blast_blocked(state, nb, side, distance[current] + 1, blast_cells):
+                    continue
                 parent[nb] = current
+                if distance is not None:
+                    distance[nb] = distance[current] + 1
                 q.append(nb)
     return None
 
@@ -697,7 +1021,7 @@ def count_exits(state, side):
     # Wrong digits are technically legal, but they cost 500 points and do not
     # represent a useful escape. Counting them as open cells made the planner
     # enter corridors whose only eventual exit was a forced penalty.
-    blocked = strategic_blocked(state)
+    blocked = strategic_blocked(state, side)
     snake = state.body(side)
     if snake and side in state.reliable_tails:
         blocked.discard(snake[-1])

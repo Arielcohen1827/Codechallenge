@@ -86,15 +86,19 @@ function parseBoard(data) {
   return lines.map((line) => {
     if (line.startsWith('|')) line = line.slice(1);
     if (line.endsWith('|')) line = line.slice(0, -1);
-    return line;
+    return [...line];
   });
 }
 
-function cellClass(char, isTarget) {
-  if (char === 'A') return 'head-a';
-  if (char === 'a') return 'body-a';
-  if (char === 'B') return 'head-b';
-  if (char === 'b') return 'body-b';
+function cellClass(char, isTarget, data = {}) {
+  for (const [side, field] of [['A', 'invincible_1'], ['B', 'invincible_2']]) {
+    const protectedSnake = Number(data[field] || 0) > 0;
+    const head = protectedSnake ? side.toLowerCase() : side;
+    const body = protectedSnake ? side : side.toLowerCase();
+    if (char === head) return `head-${side.toLowerCase()}`;
+    if (char === body) return `body-${side.toLowerCase()}`;
+  }
+  if (char === '\u2b50') return 'pickup';
   if (char === 'X') return 'pickup';
   if (char === '#') return 'wall';
   if (/^[1-9*]$/.test(char)) return isTarget ? 'target-food' : 'food';
@@ -116,7 +120,7 @@ function renderBoard(data) {
       const char = rows[row]?.[col] || ' ';
       const cell = document.createElement('div');
       const isTarget = /^[1-9]$/.test(char) && Number(char) === next;
-      cell.className = `cell ${cellClass(char, isTarget)}`;
+      cell.className = `cell ${cellClass(char, isTarget, data)}`;
       cell.textContent = char === ' ' ? '' : char;
       board.appendChild(cell);
     }

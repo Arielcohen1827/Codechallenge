@@ -1,3 +1,4 @@
+from snake_bot.game_rules import SHOOT_COST, shoot_directions
 from collections import deque
 
 from snake_bot.bot_weights import get_weights
@@ -5,6 +6,7 @@ from snake_bot.food_planner import (
     center_control_score,
     classify_safety,
     hot_lost_food_penalty,
+    food_objectives,
     move_quality_score,
     apply_move,
 )
@@ -24,6 +26,8 @@ from snake_bot.search_engine import IterativeSearchEngine
 
 def state_key(state):
     return (
+        state.rows,
+        state.cols,
         state.side,
         state.enemy,
         tuple(state.snakes.get('A', ())),
@@ -41,13 +45,25 @@ def state_key(state):
         tuple(sorted(state.tail_food_b)),
         state.crashed_a,
         state.crashed_b,
+        tuple(sorted(state.bombs_large)),
+        tuple(sorted(state.bombs_small)),
+        tuple(sorted(state.shot_food)),
+        state.pending_bomb_respawns,
         tuple(sorted(state.food_copy_targets.items())),
+        tuple(sorted(state.stars)),
+        state.invincible_a,
+        state.invincible_b,
+        state.star_spawn_due_round,
+        state.pending_star_spawns,
+        state.timeouts_a,
+        state.timeouts_b,
     )
 
 
 class TurnSearchCache:
     def __init__(self):
         self.root_side = None
+        self.action_search = None
         self.after = {}
         self.legal = {}
         self.region = {}
@@ -60,10 +76,30 @@ class TurnSearchCache:
         self.move_quality_scores = {}
 
     def apply(self, state, side, direction):
+        if isinstance(direction, tuple):
+            return self.apply_action(state, side, *direction)
         key = (state_key(state), side, direction, self.root_side)
         if key not in self.after:
             self.after[key] = apply_move(state, direction, side, perspective=self.root_side or side)
         return self.after[key]
+
+    def apply_action(self, state, side, action_type, direction):
+        if action_type == 'move':
+            return self.apply(state, side, direction)
+        from snake_bot.snake_state import apply_action
+        key = (state_key(state), side, action_type, direction, self.root_side)
+        if key not in self.after:
+            self.after[key] = apply_action(state, action_type, direction, side)
+        return self.after[key]
+
+    def legal_actions(self, state, side):
+        moves = tuple(self.legal_moves(state, side))
+        enemy = 'B' if side == 'A' else 'A'
+        shots = tuple(('shoot', direction) for direction in shoot_directions(
+            state.head(side), state.rows, state.cols, state.walls, state.body(enemy))) if (
+            not state.is_terminal() and state.scores.get(side, 0) >= SHOOT_COST
+            and not state.invincibility(enemy)) else ()
+        return moves + shots
 
     def legal_moves(self, state, side):
         key = (state_key(state), side)
@@ -290,42 +326,53 @@ def static_after_move_score(state, side, direction, plan, hunger, repeat_count, 
     evaluator = quick_position_score if quick else position_score
     score += evaluator(after, side, cache)
     target = None if state.head(side) is None else step(state.head(side), direction)
-    if target in state.food:
+    if target in food_objectives(state):
         score += weights['deep_food_now_bonus']
         score += state.food_reward(side, target) * weights['deep_score_point_value']
     elif target in state.pickups:
         score += weights['deep_pickup_now_bonus']
-    elif target in state.wrong_food():
+    elif target in state.wrong_food() and not state.invincibility(side):
         score -= weights['deep_wrong_food_penalty']
-    elif target in state.walls:
+    elif target in state.walls and not state.invincibility(side):
         score -= weights['deep_wall_hit_penalty']
     if plan is not None and plan.race_margin < 0 and direction == plan.first_move:
         score -= weights['deep_lost_plan_step_penalty']
     return score
 
 
+def shoot_score_adjustment(before, after, action, perspective):
+    """Price stationary shots on the same point scale as tactical food income."""
+    if not isinstance(action, tuple) or action[0] != 'shoot' or after.is_terminal():
+        return 0
+    enemy = 'B' if perspective == 'A' else 'A'
+    before_gap = before.scores.get(perspective, 0) - before.scores.get(enemy, 0)
+    after_gap = after.scores.get(perspective, 0) - after.scores.get(enemy, 0)
+    return (after_gap - before_gap) * get_weights()['deep_score_point_value']
+
+
 def best_reply_score(state, side, cache):
     if state.is_terminal():
         return terminal_trap_value(state, side, opponent_of(state, side))[0]
-    replies = cache.legal_moves(state, side)
+    replies = cache.legal_actions(state, side)
     if not replies:
         return -get_weights()['deep_no_reply_penalty']
     best = -1_000_000
     for reply in replies:
-        target = step(state.head(side), reply)
+        target = None if isinstance(reply, tuple) else step(state.head(side), reply)
         after = cache.apply(state, side, reply)
         if after.is_terminal():
             best = max(best, terminal_trap_value(after, side, opponent_of(state, side))[0])
             continue
         score = position_score(after, side, cache)
-        if target in state.food:
+        score += shoot_score_adjustment(state, after, reply, side)
+        if target in food_objectives(state):
             score += get_weights()['deep_food_now_bonus']
             score += state.food_reward(side, target) * get_weights()['deep_score_point_value']
         elif target in state.pickups:
             score += get_weights()['deep_pickup_now_bonus']
-        elif target in state.wrong_food():
+        elif target in state.wrong_food() and not state.invincibility(side):
             score -= get_weights()['deep_wrong_food_penalty']
-        elif target in state.walls:
+        elif target in state.walls and not state.invincibility(side):
             score -= get_weights()['deep_wall_hit_penalty']
         best = max(best, score)
     return best
@@ -336,7 +383,7 @@ def two_ply_score(state, side, direction, plan, hunger, repeat_count, cache):
     weights = get_weights()
     after = cache.apply(state, side, direction)
     enemy = opponent_of(state, side)
-    enemy_moves = cache.legal_moves(after, enemy)
+    enemy_moves = cache.legal_actions(after, enemy)
     immediate = static_after_move_score(state, side, direction, plan, hunger, repeat_count, cache)
     if after.is_terminal():
         terminal_value, terminal_outcome = terminal_trap_value(after, side, enemy)
@@ -354,17 +401,18 @@ def two_ply_score(state, side, direction, plan, hunger, repeat_count, cache):
     worst_key = None
     worst_info = None
     for enemy_move in enemy_moves:
-        enemy_target = None if enemy_head is None else step(enemy_head, enemy_move)
+        enemy_target = None if enemy_head is None or isinstance(enemy_move, tuple) else step(enemy_head, enemy_move)
         enemy_food = enemy_target in after.objective_cells() if enemy_target is not None else False
-        enemy_wall_hit = enemy_target in after.walls if enemy_target is not None else False
+        enemy_wall_hit = (enemy_target in after.walls and not after.invincibility(enemy)) if enemy_target is not None else False
         after_enemy = cache.apply(after, enemy, enemy_move)
         our_replies = cache.legal_moves(after_enemy, side)
         forced_loss = after_enemy.is_terminal() and after_enemy.terminal_winner() == enemy
         reply_score = (terminal_trap_value(after_enemy, side, enemy)[0]
                        if after_enemy.is_terminal() else best_reply_score(after_enemy, side, cache))
+        reply_score += shoot_score_adjustment(after, after_enemy, enemy_move, side)
         if enemy_food:
             reply_score -= weights['deep_enemy_food_penalty']
-            if enemy_target in after.food:
+            if enemy_target in food_objectives(after):
                 reply_score -= after.food_reward(enemy, enemy_target) * weights['deep_score_point_value']
             elif enemy_target in after.pickups:
                 reply_score -= weights['deep_enemy_pickup_penalty']
@@ -392,7 +440,7 @@ def fast_two_ply_score(state, side, direction, plan, hunger, repeat_count, cache
     cache.root_side = side
     after = cache.apply(state, side, direction)
     enemy = opponent_of(state, side)
-    enemy_moves = cache.legal_moves(after, enemy)
+    enemy_moves = cache.legal_actions(after, enemy)
     immediate = static_after_move_score(
         state,
         side,
@@ -419,17 +467,18 @@ def fast_two_ply_score(state, side, direction, plan, hunger, repeat_count, cache
     worst_score = 0
     worst_info = None
     for enemy_move in enemy_moves:
-        enemy_target = None if enemy_head is None else step(enemy_head, enemy_move)
+        enemy_target = None if enemy_head is None or isinstance(enemy_move, tuple) else step(enemy_head, enemy_move)
         enemy_food = enemy_target in after.objective_cells() if enemy_target is not None else False
-        enemy_wall_hit = enemy_target in after.walls if enemy_target is not None else False
+        enemy_wall_hit = (enemy_target in after.walls and not after.invincibility(enemy)) if enemy_target is not None else False
         after_enemy = cache.apply(after, enemy, enemy_move)
         our_replies = cache.legal_moves(after_enemy, side)
         forced_loss = after_enemy.is_terminal() and after_enemy.terminal_winner() == enemy
         reply_score = (terminal_trap_value(after_enemy, side, enemy)[0]
                        if after_enemy.is_terminal() else quick_position_score(after_enemy, side, cache))
+        reply_score += shoot_score_adjustment(after, after_enemy, enemy_move, side)
         if enemy_food:
             reply_score -= weights['deep_enemy_food_penalty']
-            if enemy_target in after.food:
+            if enemy_target in food_objectives(after):
                 reply_score -= after.food_reward(enemy, enemy_target) * weights['deep_score_point_value']
             elif enemy_target in after.pickups:
                 reply_score -= weights['deep_enemy_pickup_penalty']
@@ -455,7 +504,7 @@ def extra_depth_score(state, side, direction, cache):
     weights = get_weights()
     after = cache.apply(state, side, direction)
     enemy = opponent_of(state, side)
-    enemy_moves = cache.legal_moves(after, enemy)
+    enemy_moves = cache.legal_actions(after, enemy)
     if after.is_terminal():
         return terminal_trap_value(after, side, enemy)[0]
 
@@ -466,14 +515,14 @@ def extra_depth_score(state, side, direction, cache):
             value = terminal_trap_value(after_enemy, side, enemy)[0]
             worst = value if worst is None else min(worst, value)
             continue
-        replies = cache.legal_moves(after_enemy, side)
+        replies = cache.legal_actions(after_enemy, side)
         if not replies:
             reply_value = -weights['deep_no_reply_penalty']
         else:
             best = -1_000_000
             for reply in replies:
                 after_reply = cache.apply(after_enemy, side, reply)
-                enemy2 = cache.legal_moves(after_reply, enemy)
+                enemy2 = cache.legal_actions(after_reply, enemy)
                 if after_reply.is_terminal():
                     terminal_value, _ = terminal_trap_value(after_reply, side, enemy)
                     score = terminal_value
@@ -482,10 +531,13 @@ def extra_depth_score(state, side, direction, cache):
                     for enemy_reply in enemy2:
                         final = cache.apply(after_reply, enemy, enemy_reply)
                         values.append(terminal_trap_value(final, side, enemy)[0]
-                                      if final.is_terminal() else position_score(final, side, cache))
+                                      if final.is_terminal() else position_score(final, side, cache)
+                                      + shoot_score_adjustment(after_reply, final, enemy_reply, side))
                     score = min(values)
+                score += shoot_score_adjustment(after_enemy, after_reply, reply, side)
                 best = max(best, score)
             reply_value = best
+        reply_value += shoot_score_adjustment(after, after_enemy, enemy_move, side)
         if worst is None or reply_value < worst:
             worst = reply_value
     return worst or 0
@@ -565,6 +617,7 @@ def rank_deep_moves(
         legal,
         target=None if plan is None else plan.food,
     )
+    cache.action_search = search
     for item in analyses:
         item['search_score'] = search.scores.get(item['direction'])
         item['search_adjustment'] = 0

@@ -226,7 +226,7 @@ def run_benchmark(reference, candidate, seeds, seed, repetitions, output,
             'Game wall time measures each simulate_game call with perf_counter, including both bots and simulation; it is not search time.',
             'Throughput excludes configuration, report generation and file writing; per-search timing is unavailable.',
             'Tail generated is attributed to its beneficiary; tail collection, cleaning and points are separate from numbered food.',
-            'Rows/cols 0 select random dimensions from 12 through 20.',
+            'Rows/cols 0 select random dimensions from 20 through 30.',
         ],
     }
     games = []

@@ -14,7 +14,7 @@ def parse_log(path):
     final = None
     metadata = {}
     decision_debug = []
-    for line in path.read_text(errors='replace').splitlines():
+    for line in path.read_text(encoding='utf-8', errors='replace').splitlines():
         if line.startswith('= '):
             payload = json.loads(line[2:])
             if payload.get('event') == 'bot_version':
@@ -27,8 +27,11 @@ def parse_log(path):
                 final = payload.get('data', {})
         elif line.startswith('> '):
             payload = json.loads(line[2:])
-            if payload.get('action') == 'move':
-                actions.append(payload.get('data', {}))
+            if payload.get('action') in ('move', 'shoot'):
+                action = dict(payload.get('data', {}))
+                if payload['action'] == 'shoot':
+                    action['action_type'] = 'shoot'
+                actions.append(action)
         elif line.startswith('? '):
             payload = json.loads(line[2:])
             if payload.get('event') == 'decision_debug':
@@ -49,6 +52,11 @@ def state_signature(state):
         tuple(sorted(state.pickups)),
         tuple(sorted(state.multipliers.items())),
         tuple(sorted(state.walls)),
+        tuple(sorted(state.shot_food)),
+        tuple(sorted(state.tail_food_a)), tuple(sorted(state.tail_food_b)),
+        tuple(sorted(state.bombs_large)), tuple(sorted(state.bombs_small)),
+        tuple(sorted(state.stars)), state.invincible_a, state.invincible_b,
+        state.star_frenzy, state.star_spawn_due_round, state.pending_star_spawns,
     )
 
 
@@ -86,6 +94,12 @@ def analyze(path):
                 metrics['foods_B'] += 1
         previous_scores = dict(state.scores)
 
+        if action.get('action_type') == 'shoot':
+            # A stationary turn is not a rejected adjacent-food move, nor a
+            # collision. Keep it in the sequence so later actions stay aligned.
+            metrics['shoots_us'] += 1
+            continue
+
         plan = choose_food_plan(state, side)
         target = plan.food if plan else None
         if previous_target is not None and target != previous_target and previous_target in state.objective_cells():
@@ -112,18 +126,27 @@ def analyze(path):
             if target is None or not in_bounds(state, target):
                 metrics['out_of_bounds'] += 1
             else:
-                target_char = state.board[target[0]][target[1]]
-                if target_char == side.lower():
+                if target in state.body(side):
                     metrics['own_body_collision'] += 1
-                elif target_char in (state.enemy, state.enemy.lower()):
+                elif target in state.body(state.enemy):
                     metrics['rival_collision'] += 1
 
         head = state.head(side)
         adjacent_food_dirs = []
+        food_kinds = {'numbered': state.food, 'shot': state.shot_food,
+                      'star': state.stars,
+                      'tail': state.tail_food_a if side == 'A' else state.tail_food_b}
+        edible = frozenset().union(*food_kinds.values())
         if head is not None:
             for candidate in legal:
-                if step(head, candidate) in state.food:
+                if step(head, candidate) in edible:
                     adjacent_food_dirs.append(candidate)
+        for kind, cells in food_kinds.items():
+            adjacent = [candidate for candidate in adjacent_food_dirs
+                        if step(head, candidate) in cells]
+            if adjacent:
+                metrics[f'adjacent_{kind}_food_seen'] += 1
+                metrics[f'adjacent_{kind}_food_' + ('taken' if direction in adjacent else 'rejected')] += 1
         if adjacent_food_dirs:
             metrics['adjacent_food_seen'] += 1
             if direction in adjacent_food_dirs:

@@ -32,6 +32,12 @@ class CorpusTests(unittest.TestCase):
 
 
 class LegacyTests(unittest.TestCase):
+    def test_historical_snapshot_retains_original_hash_and_rejects_wrong_reference(self):
+        raw = replay.frozen_source('snake_bot/food_planner.py', replay.REFERENCE_X)
+        self.assertEqual(replay.digest(raw), replay.REFERENCE_X)
+        with self.assertRaisesRegex(ValueError, 'historical source hash mismatch'):
+            replay.frozen_source('snake_bot/food_planner.py', '0' * 64)
+
     def test_legacy_clips_before_integer_mean(self):
         rows = [{'direction': 'up', 'search_score': 240582},
                 {'direction': 'down', 'search_score': 240512}]

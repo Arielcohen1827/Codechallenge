@@ -1,10 +1,13 @@
 from __future__ import annotations
 
 from collections import deque
+from contextlib import contextmanager
+from contextvars import ContextVar
 from dataclasses import dataclass, replace
 
 from snake_bot.bot_weights import get_weights
-from snake_bot.game_rules import MULTIPLIER_PICKUP_SCORE, food_points, tail_food_reward
+from snake_bot.game_rules import (MULTIPLIER_PICKUP_SCORE, food_points, tail_food_reward,
+                                 shot_food_reward, bombs_active_on_turn, STAR_TURNS)
 from snake_bot.snake_state import (
     CRASH_PENALTY,
     DIRS,
@@ -19,15 +22,34 @@ from snake_bot.snake_state import (
     legal_moves,
     manhattan,
     neighbors,
-    shortest_distance,
-    shortest_path,
+    shortest_path as geometric_shortest_path,
     shrink_wall,
     step,
     strategic_blocked,
     temporal_distance_map,
-    temporal_shortest_distance,
-    temporal_shortest_path,
+    temporal_shortest_path as geometric_temporal_shortest_path,
+    path_blast_blocked,
 )
+
+
+_planning_cache = ContextVar('food_planning_cache', default=None)
+
+
+@contextmanager
+def _planning_scope():
+    """Share immutable transition results only within one planning decision."""
+    existing = _planning_cache.get()
+    if existing is not None:
+        yield existing
+        return
+    token = _planning_cache.set({'states': {}, 'simulations': {}, 'paths': {}, 'distances': {}})
+    try:
+        yield _planning_cache.get()
+    finally:
+        _planning_cache.reset(token)
+
+
+planning_scope = _planning_scope
 
 
 def move_outcomes(state, direction, side=None):
@@ -82,6 +104,8 @@ class FoodPlan:
     rival_projected_income: int = 0
     economic_swing: int = 0
     multiplier_marginal: int = 0
+    bomb_loss: int = 0
+    bomb_trigger_count: int = 0
 
     @property
     def first_move(self):
@@ -91,38 +115,118 @@ class FoodPlan:
 
 
 def simulate_path_to_food(state, side, path):
+    return simulate_path_economy(state, side, path)[0]
+
+
+def simulate_path_economy(state, side, path):
+    cache = _planning_cache.get()
+    if cache is None:
+        return _simulate_path_economy(state, side, path)
+    # Keep a strong reference so recycled ids cannot alias another state.
+    cache['states'][id(state)] = state
+    key = (id(state), side, tuple(path))
+    if key not in cache['simulations']:
+        cache['simulations'][key] = _simulate_path_economy(state, side, path)
+    return cache['simulations'][key]
+
+
+def _simulate_path_economy(state, side, path):
     current = state
-    for cell in path[1:]:
+    bomb_loss = trigger_count = 0
+    cache = _planning_cache.get()
+    for move_number, cell in enumerate(path[1:], 1):
+        prefix_key = (id(state), side, tuple(path[:move_number + 1])) if cache is not None else None
+        if cache is not None and prefix_key in cache['simulations']:
+            current, bomb_loss, trigger_count = cache['simulations'][prefix_key]
+            if current is None:
+                return None, bomb_loss, trigger_count
+            continue
         if current.is_terminal() or cell in current.walls:
-            return None
+            if cache is not None:
+                cache['simulations'][prefix_key] = (None, bomb_loss, trigger_count)
+            return None, bomb_loss, trigger_count
+        # The existing geometric projection advances only this snake. Bomb
+        # expiry also accounts for the rival's intervening turns, independently
+        # of the separate, already-correct X income horizon.
+        if (current.bombs_large or current.bombs_small or current.pending_bomb_respawns) and not bombs_active_on_turn(
+                state.remaining_moves, side == state.side, move_number):
+            current = replace(current, bombs_large=frozenset(), bombs_small=frozenset(),
+                              pending_bomb_respawns=())
         direction = direction_between(current.head(side), cell)
         if direction is None or direction not in legal_moves(current, side):
-            return None
+            if cache is not None:
+                cache['simulations'][prefix_key] = (None, bomb_loss, trigger_count)
+            return None, bomb_loss, trigger_count
         current = apply_move(current, direction, side)
+        if current.last_action.get('bomb_triggered'):
+            trigger_count += 1
+            if not current.last_action.get('invincibility_before', 0):
+                bomb_loss += current.last_action['score_before'] - current.last_action['score_after'] + 1
         walls = shrink_wall(current.walls) if side == 'A' else current.walls
-        current = GameState(
-            rows=current.rows,
-            cols=current.cols,
-            board=current.board,
-            side=side,
+        current = replace(
+            current, side=side,
             enemy=current.enemy if current.enemy != side else ('B' if side == 'A' else 'A'),
-            snakes=current.snakes,
-            food=current.food,
-            scores=current.scores,
-            remaining_moves=current.remaining_moves,
-            reliable_tails=current.reliable_tails,
-            food_values=current.food_values,
-            next_food_digit=current.next_food_digit,
-            pickups=current.pickups,
-            multipliers=current.multipliers,
             walls=walls,
-            food_copy_targets=current.food_copy_targets,
-            tail_food_a=current.tail_food_a,
-            tail_food_b=current.tail_food_b,
-            crashed_a=current.crashed_a,
-            crashed_b=current.crashed_b,
         )
-    return current
+        if cache is not None:
+            cache['simulations'][prefix_key] = (current, bomb_loss, trigger_count)
+    return current, bomb_loss, trigger_count
+
+
+def economical_path(state, start, goal, side, finder, max_time=None):
+    cache = _planning_cache.get()
+    if cache is None:
+        return _economical_path(state, start, goal, side, finder, max_time)
+    cache['states'][id(state)] = state
+    key = (id(state), start, goal, side, finder, max_time)
+    if key not in cache['paths']:
+        cache['paths'][key] = _economical_path(state, start, goal, side, finder, max_time)
+    return cache['paths'][key]
+
+
+def _economical_path(state, start, goal, side, finder, max_time=None):
+    """Compare two legal routes using the existing point/distance valuation."""
+    options = {} if max_time is None else {'max_time': max_time}
+    direct = finder(state, start, goal, side, **options)
+    if (direct is None or start != state.head(side)
+            or not (state.bombs_large or state.bombs_small) or state.remaining_moves <= 100):
+        return direct
+    if not any(path_blast_blocked(state, cell, side, index)
+                                 for index, cell in enumerate(direct[1:], 1)):
+        return direct
+    detour = finder(state, start, goal, side, avoid_blast=True, **options)
+    if detour is None or detour == direct:
+        return direct
+    weights = get_weights()
+    candidates = []
+    for path in (direct, detour):
+        distance_cost = (len(path) - 1) * weights['food_distance_cost']
+        if candidates and candidates[0][0] <= distance_cost:
+            # The blast-avoiding route cannot beat its distance-only floor.
+            break
+        after, loss, _ = simulate_path_economy(state, side, path)
+        if after is not None:
+            cost = distance_cost + loss * weights['objective_point_value']
+            candidates.append((cost, len(path), path))
+    return min(candidates)[2] if candidates else direct
+
+
+def temporal_shortest_path(state, start, goal, side, max_time=None):
+    return economical_path(state, start, goal, side, geometric_temporal_shortest_path, max_time)
+
+
+def temporal_shortest_distance(state, start, goal, side, max_time=None):
+    path = temporal_shortest_path(state, start, goal, side, max_time)
+    return None if path is None else len(path) - 1
+
+
+def shortest_path(state, start, goal, side):
+    return economical_path(state, start, goal, side, geometric_shortest_path)
+
+
+def shortest_distance(state, start, goal, side):
+    path = shortest_path(state, start, goal, side)
+    return None if path is None else len(path) - 1
 
 
 def can_reach_tail(state, side):
@@ -159,23 +263,37 @@ def tempo_race_margin(state, side, our_distance, enemy_distance):
     return margin
 
 
+def food_objectives(state):
+    """Edible food targets for shared geometry and existing positional weights."""
+    return state.food | state.shot_food | state.stars
+
+
 def food_distances(state, side, positions=None):
     """Return temporal distances to every reachable copy in one objective set."""
     head = state.head(side)
     if head is None:
         return {}
-    positions = state.food if positions is None else positions
+    positions = tuple(food_objectives(state) if positions is None else positions)
+    cache = _planning_cache.get()
+    key = (id(state), side, positions)
+    if cache is not None:
+        cache['states'][id(state)] = state
+        if key in cache['distances']:
+            return dict(cache['distances'][key])
     temporal_distances = temporal_distance_map(state, head, side, goals=positions)
-    return {
+    result = {
         food: temporal_distances[food]
         for food in positions
         if food in temporal_distances
     }
+    if cache is not None:
+        cache['distances'][key] = result
+    return dict(result)
 
 
 def food_set_race(state, side, positions=None):
     """Compare each player's fastest route to any copy of the current digit."""
-    positions = frozenset(state.food if positions is None else positions)
+    positions = frozenset((state.food if state.food_values else food_objectives(state)) if positions is None else positions)
     enemy = state.enemy if side == state.side else ('B' if side == 'A' else 'A')
     ours = food_distances(state, side, positions)
     theirs = food_distances(state, enemy, positions)
@@ -252,7 +370,7 @@ def nearest_next_food_distance(state, side, consumed_food, distances=None):
     distances = distances if distances is not None else distance_map(state, head, side)
     food_distances = [
         distances.get(food)
-        for food in state.food
+        for food in food_objectives(state)
         if food != consumed_food and distances.get(food) is not None
     ]
     return min(food_distances) if food_distances else None
@@ -297,7 +415,7 @@ def food_chain_score(state, side, consumed_food, hunger, distances=None):
 
     distances = distances if distances is not None else distance_map(state, head, side)
     best = 0
-    for food in state.food:
+    for food in food_objectives(state):
         if food == consumed_food:
             continue
         distance = distances.get(food)
@@ -334,7 +452,7 @@ def food_cluster_followup_score(state, food):
         groups = state.numbered_groups(limit=3)
         candidates = [pos for _, positions in groups[1:] for pos in positions]
     else:
-        candidates = state.food
+        candidates = food_objectives(state)
     for other in candidates:
         if other == food:
             continue
@@ -354,7 +472,10 @@ def rival_food_threat_score(state, side, food, our_distance, enemy_distance):
     if enemy_distance <= our_distance + 2:
         threat += max(0, 8 - enemy_distance) * weights['rival_food_threat_value']
         threat += food_cluster_followup_score(state, food)
-        threat += state.food_reward(enemy, food) * weights['rival_reward_point_value']
+        rival_reward = (objective_reward(state, enemy, food)
+                        if food in state.tail_food_a or food in state.tail_food_b
+                        else state.food_reward(enemy, food))
+        threat += rival_reward * weights['rival_reward_point_value']
     if tempo_race_margin(state, side, our_distance, enemy_distance) < 0:
         threat += (our_distance - enemy_distance) * weights['rival_food_threat_value']
     return threat
@@ -393,10 +514,10 @@ def advantage_control_context(state, side):
         if state.pickups:
             recoverable_threat += estimated_multiplier_points(state, enemy) * min(2, len(state.pickups))
     else:
-        recoverable_threat = min(2, len(state.food)) * FOOD_SCORE
+        recoverable_threat = min(2, len(food_objectives(state))) * FOOD_SCORE
     recoverable_threat += min(2, len(state.pickups)) * MULTIPLIER_PICKUP_SCORE
     current_enemy_reward = max(
-        (state.food_reward(enemy, food) for food in state.food),
+        (state.food_reward(enemy, food) for food in food_objectives(state)),
         default=0,
     )
     crash_score_swing = CRASH_PENALTY
@@ -413,7 +534,7 @@ def advantage_control_context(state, side):
     )
     active = (
         weights['advantage_control_enabled'] > 0
-        and bool(state.food)
+        and bool(food_objectives(state))
         and lead >= activation_lead
         and own_length >= weights['advantage_min_body']
         and own_length + weights['advantage_body_deficit'] >= enemy_length
@@ -449,7 +570,7 @@ def advantage_control_move(state, side, legal, deep_moves, reference_move=None, 
 
     enemy_distances = food_distances(state, enemy)
     reachable_food = [(distance, food) for food, distance in enemy_distances.items()]
-    threatened_food = min(reachable_food)[1] if reachable_food else next(iter(state.food), None)
+    threatened_food = min(reachable_food)[1] if reachable_food else next(iter(food_objectives(state)), None)
     before_food_distance = min(enemy_distances.values(), default=None)
     before_reachable_copies = len(enemy_distances)
     baseline_enemy_moves = len(legal_moves(state, enemy))
@@ -473,13 +594,13 @@ def advantage_control_move(state, side, legal, deep_moves, reference_move=None, 
             # forced_kill_move handles score-winning traps before this phase.
             continue
 
-        secured_food = step(state.head(side), direction) in state.food
+        secured_food = step(state.head(side), direction) in food_objectives(state)
         after_food_distance = None
         delay = 0
         food_unreachable = False
         after_enemy_distances = {}
-        if state.food and not secured_food:
-            after_enemy_distances = food_distances(after, enemy, after.food)
+        if food_objectives(state) and not secured_food:
+            after_enemy_distances = food_distances(after, enemy, food_objectives(after))
             after_food_distance = min(after_enemy_distances.values(), default=None)
             if after_food_distance is None:
                 food_unreachable = True
@@ -564,6 +685,11 @@ def classify_safety(after, side):
     exits = count_exits(after, side)
     tail_ok = can_reach_tail(after, side)
     enough_space = len(region) >= body_len + 4
+
+    if after.invincibility(side) and (exits == 0 or len(region) <= max(2, body_len)):
+        # Enclosure limits progress, but protected wall/body contacts cannot
+        # cause a crash. Reassess normally once the last protected turn ends.
+        return 'ACCEPTABLE_RISK', len(region), exits, tail_ok
 
     if exits == 0 or len(region) <= max(2, body_len):
         return 'SUICIDAL', len(region), exits, tail_ok
@@ -669,6 +795,10 @@ def food_plan_risk_penalty(state, food, our_distance, safety, space_after, exits
 
 def objective_kind(state, target, side=None):
     side = side or state.side
+    if target in state.stars:
+        return 'star'
+    if target in state.shot_food:
+        return 'shot_food'
     if target in state.tail_food_a:
         return 'tail_food' if side == 'A' else 'tail_cleanup'
     if target in state.tail_food_b:
@@ -738,10 +868,10 @@ def estimated_multiplier_points(state, side, travel_cost=0):
 
 
 def current_food_race(state, side):
-    if not state.food:
+    if not food_objectives(state):
         return None
     race = food_set_race(state, side)
-    food = race['our_food'] or race['enemy_food'] or next(iter(state.food))
+    food = race['our_food'] or race['enemy_food'] or next(iter(food_objectives(state)))
     return food, race['our_distance'], race['enemy_distance'], race['margin']
 
 
@@ -808,11 +938,43 @@ def objective_reward(state, side, target):
     kind = objective_kind(state, target, side)
     if kind == 'tail_cleanup':
         return 0
+    if kind == 'shot_food':
+        return shot_food_reward(state.multipliers.get(side, 1))
+    if kind == 'star':
+        return FOOD_SCORE * state.multipliers.get(side, 1)
     if kind == 'tail_food':
         return tail_food_reward(state.multipliers.get(side, 1))
     if target in state.pickups:
         return MULTIPLIER_PICKUP_SCORE
     return state.food_reward(side, target)
+
+
+def star_strategic_points(state, side, our_distance, enemy_distance=None):
+    """Bound a visible star's value by reachable protection and real cut food.
+
+    This estimates opportunity, never changes a rule or grants future score.
+    The existing objective point weight prices it; there are no star weights.
+    """
+    enemy = 'B' if side == 'A' else 'A'
+    if not state.star_frenzy and not wins_food_race(state, side, our_distance, enemy_distance):
+        return 0
+    arrival = 2 * our_distance - (1 if side == state.side else 0)
+    turns = max(0, (state.remaining_moves - arrival) // 2)
+    current = max(0, state.invincibility(side) - our_distance)
+    extra = max(0, min(STAR_TURNS, turns) - current)
+    if not extra or not state.body(enemy) or state.head(side) is None:
+        return 0
+    history = state.crashed_a if side == 'A' else state.crashed_b
+    avoided_loss = max(0, state.scores.get(side, 0)) if history is False else CRASH_PENALTY
+    distance = min(manhattan(state.head(side), cell) for cell in state.body(enemy))
+    cut_value = max(0, len(state.body(enemy)) - 1) * FOOD_SCORE * state.multipliers.get(side, 1)
+    benefit = (avoided_loss + cut_value) * extra // (STAR_TURNS * max(1, distance))
+    # Normal-star exclusivity vanishes at frenzy. The protective and ram value
+    # still applies there, while the rival can acquire one of many other stars.
+    if not state.star_frenzy and enemy_distance is not None:
+        exclusive_turns = min(extra, max(0, (state.remaining_moves - arrival - 100) // 2))
+        benefit += cut_value * exclusive_turns // (STAR_TURNS * max(1, enemy_distance))
+    return benefit
 
 
 def is_structural_food_risk(plan):
@@ -872,12 +1034,12 @@ def build_food_plan(state, side, food, current_target, hunger, food_race=None):
 
     our_distance = len(path) - 1
     kind = objective_kind(state, food, side)
-    if kind == 'multiplier':
+    if kind in ('multiplier', 'star'):
         arrival_cost = 2 * our_distance - (1 if side == state.side else 0)
         if arrival_cost > state.remaining_moves:
             return None
 
-    after = simulate_path_to_food(state, side, path)
+    after, bomb_loss, bomb_trigger_count = simulate_path_economy(state, side, path)
     if after is None:
         return None
 
@@ -915,7 +1077,10 @@ def build_food_plan(state, side, food, current_target, hunger, food_race=None):
 
     weights = get_weights()
     value = weights['food_base_value']
+    value -= bomb_loss * weights['objective_point_value']
     value += max(0, reward - FOOD_SCORE) * weights['objective_point_value']
+    if kind == 'star':
+        value += star_strategic_points(state, side, our_distance, enemy_distance) * weights['objective_point_value']
     economic_value = economic_swing * weights['economic_projection_value']
     economic_cap = weights['economic_projection_cap']
     value += max(-economic_cap, min(economic_cap, economic_value))
@@ -936,7 +1101,7 @@ def build_food_plan(state, side, food, current_target, hunger, food_race=None):
             value -= hunger * weights['multiplier_hunger_penalty']
         if multiplier_marginal < FOOD_SCORE * 5:
             value -= max(0, state.multipliers.get(side, 1) - 2) * weights['multiplier_stack_penalty']
-    elif state.food_values:
+    elif kind != 'star' and state.food_values:
         value += min(hunger, 30) * weights['numbered_food_hunger_value']
     value -= our_distance * weights['food_distance_cost']
     value += race_margin * weights['race_margin_value']
@@ -1000,6 +1165,8 @@ def build_food_plan(state, side, food, current_target, hunger, food_race=None):
         rival_projected_income=rival_projected_income,
         economic_swing=economic_swing,
         multiplier_marginal=multiplier_marginal,
+        bomb_loss=bomb_loss,
+        bomb_trigger_count=bomb_trigger_count,
     )
 
 
@@ -1025,7 +1192,7 @@ def build_sequence_setup_plans(state, side, current_target, hunger):
         future_food = future_choice[0]
         candidates = []
         for staging in neighbors(future_food, state.rows, state.cols):
-            if staging in occupied or staging in state.food_values or staging in state.pickups:
+            if staging in occupied or staging in state.food_values or staging in state.pickups or staging in state.stars:
                 continue
             path = temporal_shortest_path(state, head, staging, side)
             if path is None or len(path) < 2 or current_food in path[1:]:
@@ -1038,7 +1205,7 @@ def build_sequence_setup_plans(state, side, current_target, hunger):
         our_distance = len(path) - 1
         if our_distance > enemy_current_distance + weights['sequence_setup_late_slack']:
             continue
-        after = simulate_path_to_food(state, side, path)
+        after, bomb_loss, bomb_trigger_count = simulate_path_economy(state, side, path)
         if after is None:
             continue
         safety, space_after, exits_after, tail_ok = classify_safety(after, side)
@@ -1053,6 +1220,7 @@ def build_sequence_setup_plans(state, side, current_target, hunger):
         rival_projected_income = projected_sequence_income(after, enemy)
         economic_swing = projected_income - rival_projected_income
         value = weights['sequence_setup_base_value']
+        value -= bomb_loss * weights['objective_point_value']
         value += future_reward * weights['sequence_setup_reward_point_value']
         value += readiness * weights['sequence_setup_readiness_value']
         value += race_margin * weights['race_margin_value']
@@ -1091,16 +1259,24 @@ def build_sequence_setup_plans(state, side, current_target, hunger):
                 projected_income=projected_income,
                 rival_projected_income=rival_projected_income,
                 economic_swing=economic_swing,
+                bomb_loss=bomb_loss,
+                bomb_trigger_count=bomb_trigger_count,
             )
         )
     return plans
 
 
 def build_food_plans(state, side, current_target=None, hunger=0):
+    with _planning_scope():
+        return _build_food_plans(state, side, current_target, hunger)
+
+
+def _build_food_plans(state, side, current_target=None, hunger=0):
     current_food_race = food_set_race(state, side) if state.food_values else None
+    own_tail_food = state.tail_food_a if side == 'A' else state.tail_food_b
     plans = [
         plan
-        for food in state.objective_cells()
+        for food in state.objective_cells() | own_tail_food
         if (
             plan := build_food_plan(
                 state,
@@ -1137,7 +1313,7 @@ def choose_food_plan(state, side, current_target=None, hunger=0, plans=None):
     if hunger >= 10:
         harvest = [
             p for p in viable
-            if p.objective_kind == 'food'
+            if p.objective_kind in ('food', 'shot_food', 'tail_food')
             and p.race_margin >= 0
             and p.safety in ('SAFE', 'ACCEPTABLE_RISK')
         ]
@@ -1188,7 +1364,7 @@ def choose_food_plan(state, side, current_target=None, hunger=0, plans=None):
         urgent_food = [
             p
             for p in viable
-            if p.objective_kind == 'food'
+            if p.objective_kind in ('food', 'shot_food', 'tail_food')
             and p.safety == 'SAFE'
             and p.race_margin >= 0
             and p.our_distance <= nearest_distance + 2
@@ -1280,7 +1456,7 @@ def should_use_plan_for_positioning(plan):
 
 
 def fallback_hunger_food_score(state, side, after, head, hunger):
-    if hunger < 10 or head is None or not after.food:
+    if hunger < 10 or head is None or not food_objectives(after):
         return 0
 
     enemy = state.enemy if side == state.side else ('B' if side == 'A' else 'A')
@@ -1289,7 +1465,7 @@ def fallback_hunger_food_score(state, side, after, head, hunger):
     weights = get_weights()
     distances = distance_map(after, head, side)
     best = 0
-    for food in after.food:
+    for food in food_objectives(after):
         after_distance = distances.get(food)
         if after_distance is None:
             continue
@@ -1311,7 +1487,7 @@ def fallback_hunger_food_score(state, side, after, head, hunger):
 
 
 def fallback_denial_score(state, side, after, head):
-    if head is None or not state.food:
+    if head is None or not food_objectives(state):
         return 0
 
     enemy = state.enemy if side == state.side else ('B' if side == 'A' else 'A')
@@ -1324,7 +1500,7 @@ def fallback_denial_score(state, side, after, head):
         weights = get_weights()
         after_distances = distance_map(after, head, side)
         score = 0
-        for food in state.food:
+        for food in food_objectives(state):
             enemy_distance = temporal_shortest_distance(state, enemy_head, food, enemy)
             if enemy_distance is None or enemy_distance > 5:
                 continue
@@ -1342,7 +1518,7 @@ def fallback_denial_score(state, side, after, head):
     before_distance = race['our_distance']
     if enemy_distance is None or enemy_distance > 5 or before_distance is None:
         return 0
-    after_distances = food_distances(after, side, after.food)
+    after_distances = food_distances(after, side, food_objectives(after))
     after_distance = min(after_distances.values(), default=None)
     if after_distance is None:
         return 0
@@ -1491,26 +1667,26 @@ def hot_lost_food_penalty(state, side, direction):
     if after_head is None:
         return 0
 
+    weights = get_weights()
+    penalty = 0
+    for food in state.shot_food | (state.food if not state.food_values else frozenset()):
+        our_distance = temporal_shortest_distance(state, head, food, side)
+        enemy_distance = temporal_shortest_distance(state, enemy_head, food, enemy)
+        if (
+            our_distance is None
+            or enemy_distance is None
+            or enemy_distance >= our_distance
+            or enemy_distance > 2
+        ):
+            continue
+        after_distance = temporal_shortest_distance(after, after_head, food, side)
+        if (
+            after_distance is not None
+            and after_distance < our_distance
+            and (our_distance <= 6 or after_distance <= 3)
+        ):
+            penalty += weights['hot_lost_food_base'] + (3 - enemy_distance) * weights['hot_lost_food_enemy_bonus']
     if not state.food_values:
-        weights = get_weights()
-        penalty = 0
-        for food in state.food:
-            our_distance = temporal_shortest_distance(state, head, food, side)
-            enemy_distance = temporal_shortest_distance(state, enemy_head, food, enemy)
-            if (
-                our_distance is None
-                or enemy_distance is None
-                or enemy_distance >= our_distance
-                or enemy_distance > 2
-            ):
-                continue
-            after_distance = temporal_shortest_distance(after, after_head, food, side)
-            if (
-                after_distance is not None
-                and after_distance < our_distance
-                and (our_distance <= 6 or after_distance <= 3)
-            ):
-                penalty += weights['hot_lost_food_base'] + (3 - enemy_distance) * weights['hot_lost_food_enemy_bonus']
         return penalty
 
     race = food_set_race(state, side)
@@ -1522,7 +1698,7 @@ def hot_lost_food_penalty(state, side, direction):
         or enemy_distance >= our_distance
         or enemy_distance > 2
     ):
-        return 0
+        return penalty
     after_distances = food_distances(after, side, after.food)
     after_distance = min(after_distances.values(), default=None)
     if (
@@ -1530,9 +1706,9 @@ def hot_lost_food_penalty(state, side, direction):
         or after_distance >= our_distance
         or (our_distance > 6 and after_distance > 3)
     ):
-        return 0
+        return penalty
     weights = get_weights()
-    return weights['hot_lost_food_base'] + (3 - enemy_distance) * weights['hot_lost_food_enemy_bonus']
+    return penalty + weights['hot_lost_food_base'] + (3 - enemy_distance) * weights['hot_lost_food_enemy_bonus']
 
 
 def winning_suicide_move(state, side):
@@ -1623,7 +1799,7 @@ def survival_move_analysis(state, side, direction, plan=None, hunger=0, repeat_c
             'reply_count': 0,
             'region': len(region),
             'exits': exits,
-            'food_now': head in state.food,
+            'food_now': head in food_objectives(state),
             'enemy_food': False,
         }
     safety, _, _, _ = classify_safety(after, side)
@@ -1637,11 +1813,11 @@ def survival_move_analysis(state, side, direction, plan=None, hunger=0, repeat_c
             'reply_count': 0,
             'region': len(region),
             'exits': exits,
-            'food_now': head in state.food if head is not None else False,
+            'food_now': head in food_objectives(state) if head is not None else False,
             'enemy_food': False,
         }
     base = move_quality_score(state, side, direction, plan, hunger, repeat_count)[0]
-    if head in state.food:
+    if head in food_objectives(state):
         base += weights['survival_immediate_food_bonus']
 
     worst_future = None
@@ -1650,7 +1826,7 @@ def survival_move_analysis(state, side, direction, plan=None, hunger=0, repeat_c
     worst_enemy_food = False
     for enemy_move in enemy_moves:
         enemy_target = None if enemy_head is None else step(enemy_head, enemy_move)
-        enemy_food = enemy_target in after.food if enemy_target is not None else False
+        enemy_food = enemy_target in food_objectives(after) if enemy_target is not None else False
         after_enemy = apply_move(after, enemy_move, enemy, perspective=side)
         replies = available_moves(after_enemy, side)
         if after_enemy.is_terminal():
@@ -1662,7 +1838,7 @@ def survival_move_analysis(state, side, direction, plan=None, hunger=0, repeat_c
                 survival_position_score(apply_move(after_enemy, reply, side), side)
                 + (
                     weights['survival_immediate_food_bonus']
-                    if step(after_enemy.head(side), reply) in after_enemy.food
+                    if step(after_enemy.head(side), reply) in food_objectives(after_enemy)
                     else 0
                 )
                 for reply in replies
@@ -1685,7 +1861,7 @@ def survival_move_analysis(state, side, direction, plan=None, hunger=0, repeat_c
         'reply_count': worst_reply_count,
         'region': len(region),
         'exits': exits,
-        'food_now': head in state.food,
+        'food_now': head in food_objectives(state),
         'enemy_food': worst_enemy_food,
     }
 
@@ -1712,7 +1888,7 @@ def move_quality_score(state, side, direction, plan=None, hunger=0, repeat_count
     weights = get_weights()
     tempo_hunger = hunger + score_gap_urgency(state, side)
     after = apply_move(state, direction, side)
-    wall_hit = step(state.head(side), direction) in state.walls
+    wall_hit = step(state.head(side), direction) in state.walls and not state.invincibility(side)
     head = after.head(side)
     if head is None:
         return (-999999, 0, 0, 0)
@@ -1721,8 +1897,8 @@ def move_quality_score(state, side, direction, plan=None, hunger=0, repeat_count
         return (-999999, 0, 0, 0)
     danger_penalty = weights['fallback_danger_penalty'] if safety == 'DANGEROUS' and tempo_hunger < 35 else 0
     nearest = None
-    if after.food:
-        distances = [shortest_distance(after, head, food, side) for food in after.food]
+    if food_objectives(after):
+        distances = [shortest_distance(after, head, food, side) for food in food_objectives(after)]
         distances = [d for d in distances if d is not None]
         nearest = min(distances) if distances else None
     progress = 0
@@ -1739,6 +1915,8 @@ def move_quality_score(state, side, direction, plan=None, hunger=0, repeat_count
     territory_score = territory_control_score(after, side, head) if len(after.body(side)) > 3 else 0
     hunger_food_score = fallback_hunger_food_score(state, side, after, head, tempo_hunger)
     denial_score = fallback_denial_score(state, side, after, head)
+    bomb_loss = (after.last_action['score_before'] - after.last_action['score_after'] + 1
+                 if after.last_action.get('bomb_triggered') and not state.invincibility(side) else 0)
     return (
         progress * (weights['fallback_progress_value'] + tempo_hunger * weights['fallback_hunger_progress_value'])
         + food_distance_score
@@ -1750,8 +1928,9 @@ def move_quality_score(state, side, direction, plan=None, hunger=0, repeat_count
         + rival_penalty
         - hot_lost_penalty
         - danger_penalty
+        - bomb_loss * weights['objective_point_value']
         - (weights['fallback_wall_hit_penalty'] if wall_hit else 0),
-        1 if head in state.food else 0,
+        1 if head in food_objectives(state) else 0,
         exits,
         min(len(region), 60),
     )

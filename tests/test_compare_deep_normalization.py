@@ -6,6 +6,7 @@ from pathlib import Path
 import shutil
 import tempfile
 import unittest
+import zipfile
 from unittest.mock import patch
 
 from snake_bot import bot_weights, food_planner, move_search, snake_brain
@@ -23,7 +24,7 @@ class ComparatorTests(unittest.TestCase):
     @classmethod
     def setUpClass(cls):
         cls.weights = bot_weights.load_weights(compare.EXTERNAL / 'baseline_active_weights.json')
-        cls.planner = compare.load_planner(ROOT / 'snake_bot/food_planner.py', compare.PLANNER_SHA, cls.weights)
+        cls.planner = replay.load_reference_planner(cls.weights)
         cls.reference = compare.load_planner(compare.BASELINE, compare.REFERENCE_SHA, cls.weights)
         cls.cases = json.loads((ROOT / 'tests/fixtures/deep_clipping_real_v7.json').read_text())['cases']
         cls.case = next(c for c in cls.cases if c['provenance']['game_id'].startswith('8d25279e')
@@ -35,8 +36,14 @@ class ComparatorTests(unittest.TestCase):
         directory = tempfile.TemporaryDirectory()
         self.addCleanup(directory.cleanup)
         self.cli_root = Path(directory.name)
-        shutil.copytree(ROOT / 'snake_bot', self.cli_root / 'snake_bot',
-                        ignore=shutil.ignore_patterns('__pycache__'))
+        # The accepted manifest certifies v7 bytes. Keep its exact sources in
+        # this CLI fixture instead of asking v9 production to match old hashes.
+        with zipfile.ZipFile(replay.FROZEN_SOURCES) as archive:
+            provenance = json.loads(archive.read('provenance.json'))
+        for name in provenance['sources']:
+            destination = self.cli_root / name
+            destination.parent.mkdir(parents=True, exist_ok=True)
+            destination.write_bytes(replay.frozen_source(name))
         shutil.copyfile(CANDIDATE, self.cli_root / 'snake_bot/move_search.py')
         (self.cli_root / 'weights').mkdir()
         shutil.copyfile(ROOT / 'weights/active_weights.json',
@@ -44,6 +51,13 @@ class ComparatorTests(unittest.TestCase):
         root_patch = patch.object(compare, 'ROOT', self.cli_root)
         root_patch.start()
         self.addCleanup(root_patch.stop)
+        # main validates the simulator source too; dispatch itself remains
+        # mocked in these CLI contract tests.
+        simulator = replay.load_frozen_module('tools/bot_lab.py', provenance['sources']['tools/bot_lab.py'])
+        simulator.__file__ = str(self.cli_root / 'tools/bot_lab.py')
+        simulator_patch = patch.object(compare, 'bot_lab', simulator)
+        simulator_patch.start()
+        self.addCleanup(simulator_patch.stop)
 
     def test_private_brains_share_planner_weights_but_not_production_globals(self):
         before = dict(bot_weights.get_weights())

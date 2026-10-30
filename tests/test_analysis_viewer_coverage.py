@@ -205,6 +205,27 @@ class AnalyzerCoverageTests(unittest.TestCase):
         self.assertEqual(analyzer.state_signature(base), analyzer.state_signature(same))
         self.assertNotEqual(analyzer.state_signature(base), analyzer.state_signature(changed))
 
+    def test_food_metrics_aggregate_but_keep_numbered_shot_and_tail_kinds_separate(self):
+        for symbol, kind in (('1', 'numbered'), ('*', 'shot'), ('\u24b6', 'tail')):
+            with self.subTest(kind=kind):
+                metrics = analyzer.analyze(self.log([turn('|A' + symbol + ' B|')], ['right']))
+                self.assertEqual(metrics['adjacent_food_taken'], 1)
+                self.assertEqual(metrics['adjacent_' + kind + '_food_taken'], 1)
+                self.assertEqual(metrics['foods_us'], 1)
+                for other in {'numbered', 'shot', 'tail'} - {kind}:
+                    self.assertEqual(metrics['adjacent_' + other + '_food_taken'], 0)
+
+    def test_shoot_preserves_action_alignment_without_movement_food_diagnostics(self):
+        path = self.log([turn(score_1=6000), turn(score_1=1000)])
+        with path.open('a', encoding='utf-8') as handle:
+            handle.write('\n> ' + json.dumps({'action': 'shoot', 'data': {'direction': 'right'}}))
+            handle.write('\n> ' + json.dumps({'action': 'move', 'data': {'direction': 'right'}}))
+        metrics = analyzer.analyze(path)
+        self.assertEqual(metrics['total_turns'], 2)
+        self.assertEqual(metrics['shoots_us'], 1)
+        self.assertEqual(metrics['adjacent_food_seen'], 1)
+        self.assertEqual(metrics['foods_us'], 1)
+
     def test_score_food_delta_threshold_and_missing_side(self):
         for before, after, expected in [(0, 99, False), (10, 110, True),
                                         (100, 0, False)]:
