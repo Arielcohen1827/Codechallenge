@@ -4,12 +4,15 @@ import unittest
 from unittest.mock import patch
 import tempfile
 import gzip
+import shutil
 
 from tools import deep_clipping_replay as replay
 
 
 ROOT = Path(__file__).resolve().parents[1]
-EXTERNAL = Path('C:/Users/ariel/.codex/visualizations/2026/10/07/01a11686-3a99-78d1-90d4-b5245bb38d12')
+SUPPORT = replay.historical_support()
+EXTERNAL = SUPPORT / 'external'
+LOG_EXCERPTS = SUPPORT / 'logs'
 
 
 class CorpusTests(unittest.TestCase):
@@ -20,7 +23,7 @@ class CorpusTests(unittest.TestCase):
         self.assertEqual(len(names), 86)
 
     def test_real_known_loss_is_not_terminal(self):
-        cases = replay.read_log(ROOT / 'games/game_8d25279e-c5d3-11f1-96f5-a2aacf8fcf85.log')
+        cases = replay.read_log(LOG_EXCERPTS / 'game_8d25279e-c5d3-11f1-96f5-a2aacf8fcf85.log')
         case = next(c for c in cases if c['provenance']['debug_line'] == 498)
         analysis = replay.analyze_case(case)
         self.assertEqual(analysis['terminal_class'], 'normal')
@@ -105,7 +108,7 @@ class FixtureTests(unittest.TestCase):
         self.assertGreaterEqual(len(self.fixtures), 20)
         for case in self.fixtures:
             with self.subTest(provenance=case['provenance']):
-                line = (ROOT / 'games' / case['provenance']['filename']).read_text(encoding='utf-8-sig').splitlines()[case['provenance']['debug_line'] - 1]
+                line = (LOG_EXCERPTS / case['provenance']['filename']).read_text(encoding='utf-8-sig').splitlines()[case['provenance']['debug_line'] - 1]
                 recorded = json.loads(line[2:])
                 self.assertEqual(recorded['deep_moves'], case['diagnostic']['deep_moves'])
                 self.assertEqual(replay.digest(line.encode()), case['provenance']['debug_sha256'])
@@ -184,6 +187,24 @@ class FrozenEngineTests(unittest.TestCase):
 
 
 class ComparisonCliTests(unittest.TestCase):
+    def setUp(self):
+        directory = tempfile.TemporaryDirectory()
+        self.addCleanup(directory.cleanup)
+        root = Path(directory.name)
+        # Exercise the CLI's real input reads using an isolated, explicit audit
+        # environment, never ignored files left beside a developer's checkout.
+        for name, source in (
+                ('snake_bot/search_engine.py', ROOT / 'snake_bot/search_engine.py'),
+                ('weights/active_weights.json', EXTERNAL / 'baseline_active_weights.json'),
+                ('games/game_8d25279e-c5d3-11f1-96f5-a2aacf8fcf85.log',
+                 LOG_EXCERPTS / 'game_8d25279e-c5d3-11f1-96f5-a2aacf8fcf85.log')):
+            destination = root / name
+            destination.parent.mkdir(parents=True, exist_ok=True)
+            shutil.copyfile(source, destination)
+        root_patch = patch.object(replay, 'ROOT', root)
+        root_patch.start()
+        self.addCleanup(root_patch.stop)
+
     def test_real_two_case_cli_reports_final_moves_and_exclusions(self):
         fixtures = json.loads((ROOT / 'tests/fixtures/deep_clipping_real_v7.json').read_text())['cases']
         chosen = [c for c in fixtures if c['provenance']['debug_line'] == 498 or

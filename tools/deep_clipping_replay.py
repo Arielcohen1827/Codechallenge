@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import argparse
+import atexit
 from collections import Counter, defaultdict
 import copy
 from dataclasses import asdict
@@ -14,6 +15,7 @@ from pathlib import Path
 import re
 from statistics import median
 import sys
+import tempfile
 from time import perf_counter
 from types import SimpleNamespace, ModuleType
 import zipfile
@@ -22,6 +24,8 @@ ROOT = Path(__file__).resolve().parents[1]
 REFERENCE_X = '64dd15b53bc755af443cee49948c368ce41bac3097a3eab32c5c95a6875e68e3'
 REFERENCE_SEARCH = '09142bcc462f3ae8954e6527c21cb4f80784e1d0c4db2b10372db438a44d3dc4'
 FROZEN_SOURCES = ROOT / 'tests/fixtures/deep_v7_sources.zip'
+FROZEN_SUPPORT = ROOT / 'tests/fixtures/deep_v7_support.zip'
+_support_directory = None
 OBSERVED_FIELDS = ('game_id', 'board', 'side', 'remaining_moves', 'rows', 'cols',
                    'board_size', 'score_1', 'score_2', 'multiplier_1', 'multiplier_2')
 CONTEXT_FIELDS = ('side', 'head', 'enemy_head', 'scores', 'multipliers', 'food',
@@ -33,6 +37,32 @@ CONTEXT_FIELDS = ('side', 'head', 'enemy_head', 'scores', 'multipliers', 'food',
 
 def digest(data):
     return hashlib.sha256(data).hexdigest()
+
+
+def historical_support():
+    """Materialize certified audit inputs outside the source/coverage tree."""
+    global _support_directory
+    if _support_directory is None:
+        directory = tempfile.TemporaryDirectory(prefix='snake-v7-support-')
+        root = Path(directory.name)
+        try:
+            with zipfile.ZipFile(FROZEN_SUPPORT) as archive:
+                manifest = json.loads(archive.read('provenance.json'))
+                for name, expected in manifest['files'].items():
+                    path = root / name
+                    path.resolve().relative_to(root.resolve())
+                    raw = archive.read(name)
+                    if digest(raw) != expected:
+                        raise ValueError('Historical support hash mismatch: ' + name)
+                    path.parent.mkdir(parents=True, exist_ok=True)
+                    path.write_bytes(raw)
+                (root / 'provenance.json').write_bytes(archive.read('provenance.json'))
+        except BaseException:
+            directory.cleanup()
+            raise
+        _support_directory = directory
+        atexit.register(directory.cleanup)
+    return Path(_support_directory.name)
 
 
 def normalized(value):

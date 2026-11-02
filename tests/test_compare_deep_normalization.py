@@ -46,7 +46,7 @@ class ComparatorTests(unittest.TestCase):
             destination.write_bytes(replay.frozen_source(name))
         shutil.copyfile(CANDIDATE, self.cli_root / 'snake_bot/move_search.py')
         (self.cli_root / 'weights').mkdir()
-        shutil.copyfile(ROOT / 'weights/active_weights.json',
+        shutil.copyfile(compare.EXTERNAL / 'baseline_active_weights.json',
                         self.cli_root / 'weights/active_weights.json')
         root_patch = patch.object(compare, 'ROOT', self.cli_root)
         root_patch.start()
@@ -244,7 +244,7 @@ class ComparatorTests(unittest.TestCase):
     def cli_args(self, output):
         return ['--candidate-sha', CANDIDATE_SHA,
                 '--fixtures', str(ROOT / 'tests/fixtures/deep_clipping_real_v7.json'),
-                '--shared-manifest', str(ROOT / 'games/benchmarks/planner_x_12seeds_20261012/manifest.json'),
+                '--shared-manifest', str(compare.EXTERNAL / 'planner_x_manifest.json'),
                 '--weights', str(compare.EXTERNAL / 'baseline_active_weights.json'), '--output', str(output)]
 
     def test_actual_cli_prepare_serializes_proof_manifest_and_no_games(self):
@@ -319,7 +319,7 @@ class ComparatorTests(unittest.TestCase):
     def test_cli_refuses_changes_in_shared_sources(self):
         with tempfile.TemporaryDirectory() as directory:
             manifest = Path(directory) / 'accepted.json'
-            accepted = json.loads((ROOT / 'games/benchmarks/planner_x_12seeds_20261012/manifest.json').read_text())
+            accepted = json.loads((compare.EXTERNAL / 'planner_x_manifest.json').read_text())
             accepted['shared_sources']['snake_bot\\snake_brain.py'] = '0' * 64
             manifest.write_text(json.dumps(accepted))
             with self.assertRaisesRegex(ValueError, 'shared source'), patch.object(compare, 'run_comparison') as run:

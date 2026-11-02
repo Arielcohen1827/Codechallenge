@@ -22,7 +22,7 @@ from tools.compare_food_planners import (atomic_json, load_planner, normalized,
                                         private_class, private_namespace, sha256, shared_weights)
 
 ROOT = Path(__file__).resolve().parents[1]
-EXTERNAL = Path('C:/Users/ariel/.codex/visualizations/2026/10/07/01a11686-3a99-78d1-90d4-b5245bb38d12')
+EXTERNAL = replay.historical_support() / 'external'
 BASELINE = EXTERNAL / 'deep_clipping_phase1/move_search.baseline.py'
 REFERENCE_SHA = replay.REFERENCE_SEARCH
 PLANNER_SHA = replay.REFERENCE_X
@@ -277,11 +277,11 @@ def main(argv=None):
     if sha256(args.weights) != WEIGHTS_SHA or sha256(ROOT / 'snake_bot/search_engine.py') != ENGINE_SHA:
         raise ValueError('weights/engine SHA256 mismatch')
     accepted = json.loads(args.shared_manifest.read_text())
-    shared_sources = {str(path.relative_to(ROOT)): sha256(path)
+    shared_sources = {path.relative_to(ROOT).as_posix(): sha256(path)
                       for path in sorted((ROOT / 'snake_bot').glob('*.py'))
                       if path.name not in ('move_search.py', 'food_planner.py')}
-    expected_sources = {name: digest for name, digest in accepted['shared_sources'].items()
-                        if Path(name).name not in ('move_search.py', 'food_planner.py')}
+    expected_sources = {name.replace('\\', '/'): digest for name, digest in accepted['shared_sources'].items()
+                        if Path(name.replace('\\', '/')).name not in ('move_search.py', 'food_planner.py')}
     if shared_sources != expected_sources or sha256(bot_lab.__file__) != accepted['simulator_sha256']:
         raise ValueError('shared source/simulator differs from accepted X64 manifest')
     changed = validate_candidate(args.reference.read_text(), args.candidate.read_text())
