@@ -7,10 +7,20 @@ from tools import bot_lab
 
 
 def state(**changes):
-    base = GameState(rows=20, cols=30, board=(), side='A', enemy='B',
+    base = GameState(
+        rows=20,
+        cols=30,
+        board=(),
+        side='A',
+        enemy='B',
         snakes={'A': ((5, 5), (5, 4)), 'B': ((5, 10), (6, 10), (7, 10))},
-        food=frozenset(), scores={'A': 6000, 'B': 100}, remaining_moves=200,
-        reliable_tails=frozenset({'A', 'B'}), crashed_a=False, crashed_b=False)
+        food=frozenset(),
+        scores={'A': 6000, 'B': 100},
+        remaining_moves=200,
+        reliable_tails=frozenset({'A', 'B'}),
+        crashed_a=False,
+        crashed_b=False,
+    )
     return replace(base, **changes)
 
 
@@ -25,21 +35,35 @@ class CompactV89Tests(unittest.TestCase):
 
     def test_compact_actions_respect_shoot_threshold(self):
         for score in (4999, 5000):
-            engine, compact = IterativeSearchEngine.from_game_state(state(scores={'A': score, 'B': 0}))
+            engine, compact = IterativeSearchEngine.from_game_state(
+                state(scores={'A': score, 'B': 0})
+            )
             actions = engine.available_actions(compact)
             self.assertEqual(('shoot', 'right') in actions, score >= 5000)
 
     def test_compact_and_game_transitions_equivalent(self):
         from snake_bot.snake_state import apply_action
-        cases = [(state(bombs_large=frozenset({(7, 7)})), 'move', 'right'),
-                 (state(shot_food=frozenset({(5, 6)})), 'move', 'right'),
-                 (state(), 'shoot', 'right'), (state(), 'shoot', 'up'),
-                 (state(remaining_moves=101, bombs_small=frozenset({(12, 12)})), 'move', 'right')]
+
+        cases = [
+            (state(bombs_large=frozenset({(7, 7)})), 'move', 'right'),
+            (state(shot_food=frozenset({(5, 6)})), 'move', 'right'),
+            (state(), 'shoot', 'right'),
+            (state(), 'shoot', 'up'),
+            (
+                state(remaining_moves=101, bombs_small=frozenset({(12, 12)})),
+                'move',
+                'right',
+            ),
+        ]
         for before, kind, direction in cases:
             with self.subTest(kind=kind, direction=direction):
                 engine, compact = IterativeSearchEngine.from_game_state(before)
-                expected = IterativeSearchEngine.from_game_state(apply_action(before, kind, direction))[1]
-                self.assertEqual(engine.apply_action(compact, kind, direction), expected)
+                expected = IterativeSearchEngine.from_game_state(
+                    apply_action(before, kind, direction)
+                )[1]
+                self.assertEqual(
+                    engine.apply_action(compact, kind, direction), expected
+                )
 
     def test_large_rectangular_board_roundtrips_emoji(self):
         from snake_bot.snake_state import parse_state
@@ -67,11 +91,15 @@ class CompactV89Tests(unittest.TestCase):
         self.assertEqual(after.shot_food, before.shot_food)
         for cell in set(after.food_values) | set(after.pickups):
             self.assertGreater(max(abs(cell[0]-12), abs(cell[1]-12)), 2)
+
     def test_tactical_action_cache_and_shot_food_identity(self):
         from snake_bot.move_search import TurnSearchCache
         from snake_bot.food_planner import objective_kind, objective_reward
+
         cache = TurnSearchCache()
-        before = state(shot_food=frozenset({(3, 3)}), multipliers={'A': 3, 'B': 1})
+        before = state(
+            shot_food=frozenset({(3, 3)}), multipliers={'A': 3, 'B': 1}
+        )
         self.assertIn(('shoot', 'right'), cache.legal_actions(before, 'A'))
         after = cache.apply(before, 'A', ('shoot', 'right'))
         self.assertEqual(after.scores['A'], 1000)
@@ -98,26 +126,58 @@ class CompactV89Tests(unittest.TestCase):
         self.assertEqual(len(eaten.body('A')), 2)
         self.assertEqual(eaten.scores['A'], 100)
         self.assertNotIn((5, 5), eaten.shot_food)
+
     def test_lab_bomb_respawns_safe_or_remain_pending_and_expire(self):
         import random
-        before = state(pending_bomb_respawns=('large', 'small'),
-                       shot_food=frozenset({(12, 12)}))
+
+        before = state(
+            pending_bomb_respawns=('large', 'small'),
+            shot_food=frozenset({(12, 12)}),
+        )
         after = bot_lab.respawn_bombs(before, random.Random(8))
-        self.assertEqual((len(after.bombs_large), len(after.bombs_small)), (1, 1))
+        self.assertEqual(
+            (len(after.bombs_large), len(after.bombs_small)), (1, 1)
+        )
         self.assertEqual(after.pending_bomb_respawns, ())
         for bombs, radius in ((after.bombs_large, 2), (after.bombs_small, 1)):
             for bomb in bombs:
-                for protected in (before.head('A'), before.head('B'), (12, 12)):
-                    self.assertGreater(max(abs(bomb[0]-protected[0]), abs(bomb[1]-protected[1])), radius)
-        full = state(rows=1, cols=2, snakes={'A': ((0, 0),), 'B': ((0, 1),)},
-                     pending_bomb_respawns=('large', 'small'))
-        self.assertEqual(bot_lab.respawn_bombs(full, random.Random(1)).pending_bomb_respawns,
-                         ('large', 'small'))
+                for protected in (
+                    before.head('A'),
+                    before.head('B'),
+                    (12, 12),
+                ):
+                    self.assertGreater(
+                        max(
+                            abs(bomb[0] - protected[0]),
+                            abs(bomb[1] - protected[1]),
+                        ),
+                        radius,
+                    )
+        full = state(
+            rows=1,
+            cols=2,
+            snakes={'A': ((0, 0),), 'B': ((0, 1),)},
+            pending_bomb_respawns=('large', 'small'),
+        )
+        self.assertEqual(
+            bot_lab.respawn_bombs(
+                full, random.Random(1)
+            ).pending_bomb_respawns,
+            ('large', 'small'),
+        )
         initial = bot_lab.initial_state(2, rows=20, cols=30, max_turns=400)
-        self.assertEqual((len(initial.bombs_large), len(initial.bombs_small)), (2, 5))
-        for cell in set(initial.food_values) | set(initial.pickups) | set(initial.shot_food):
+        self.assertEqual(
+            (len(initial.bombs_large), len(initial.bombs_small)), (2, 5)
+        )
+        for cell in (
+            set(initial.food_values)
+            | set(initial.pickups)
+            | set(initial.shot_food)
+        ):
             self.assertFalse(bot_lab.in_blast_zone(initial, cell))
-        expired = bot_lab.respawn_bombs(replace(after, remaining_moves=100), random.Random(1))
+        expired = bot_lab.respawn_bombs(
+            replace(after, remaining_moves=100), random.Random(1)
+        )
         self.assertFalse(expired.bombs_large | expired.bombs_small)
         self.assertFalse(expired.pending_bomb_respawns)
 
@@ -129,14 +189,25 @@ class CompactV89Tests(unittest.TestCase):
             value, _ = scorer(before, 'A', 'down', None, 0, 0, cache)
             self.assertIsInstance(value, (int, float))
             self.assertTrue(any('shoot' in key for key in cache.after if isinstance(key, tuple)))
-    def test_root_search_accepts_official_tuple_and_protocol_dict_actions(self):
+
+    def test_root_search_accepts_official_tuple_and_protocol_dict_actions(
+        self,
+    ):
         before = state(rows=8, cols=12)
-        for legal in ([('move', 'down'), ('shoot', 'right')],
-                      [{'action_type': 'move', 'direction': 'down'},
-                       {'action_type': 'shoot', 'direction': 'right'}],
-                      [{'action': 'move', 'data': {'direction': 'down'}},
-                       {'action': 'shoot', 'data': {'direction': 'right'}}]):
-            engine, compact = IterativeSearchEngine.from_game_state(before, time_budget_ms=1000, max_depth=2)
+        for legal in (
+            [('move', 'down'), ('shoot', 'right')],
+            [
+                {'action_type': 'move', 'direction': 'down'},
+                {'action_type': 'shoot', 'direction': 'right'},
+            ],
+            [
+                {'action': 'move', 'data': {'direction': 'down'}},
+                {'action': 'shoot', 'data': {'direction': 'right'}},
+            ],
+        ):
+            engine, compact = IterativeSearchEngine.from_game_state(
+                before, time_budget_ms=1000, max_depth=2
+            )
             result = engine.search(compact, 'A', legal)
             self.assertIn('down', result.scores)
             self.assertIn(('shoot', 'right'), result.scores)
@@ -146,19 +217,56 @@ class CompactV89Tests(unittest.TestCase):
 
     def test_compact_equivalence_for_B_and_v7_number_growth(self):
         from snake_bot.snake_state import apply_action
+
         for before, kind, direction in (
-            (state(side='B', enemy='A', scores={'A': 0, 'B': 6000}), 'shoot', 'left'),
-            (state(side='B', enemy='A', shot_food=frozenset({(5, 11)})), 'move', 'right'),
-            (state(food_values={(5, 6): 2, (2, 2): 1}, food=frozenset({(2, 2)}), next_food_digit=1), 'move', 'right'),
-            (state(remaining_moves=101, side='B', enemy='A', bombs_large=frozenset({(12, 12)})), 'shoot', 'up')):
+            (
+                state(side='B', enemy='A', scores={'A': 0, 'B': 6000}),
+                'shoot',
+                'left',
+            ),
+            (
+                state(side='B', enemy='A', shot_food=frozenset({(5, 11)})),
+                'move',
+                'right',
+            ),
+            (
+                state(
+                    food_values={(5, 6): 2, (2, 2): 1},
+                    food=frozenset({(2, 2)}),
+                    next_food_digit=1,
+                ),
+                'move',
+                'right',
+            ),
+            (
+                state(
+                    remaining_moves=101,
+                    side='B',
+                    enemy='A',
+                    bombs_large=frozenset({(12, 12)}),
+                ),
+                'shoot',
+                'up',
+            ),
+        ):
             engine, compact = IterativeSearchEngine.from_game_state(before)
             after = apply_action(before, kind, direction)
-            self.assertEqual(engine.apply_action(compact, kind, direction),
-                             IterativeSearchEngine.from_game_state(after)[1])
+            self.assertEqual(
+                engine.apply_action(compact, kind, direction),
+                IterativeSearchEngine.from_game_state(after)[1],
+            )
+
     def test_shot_food_planning_survives_parser_separation_and_growth(self):
-        from snake_bot.food_planner import build_food_plans, choose_food_plan, simulate_path_to_food
+        from snake_bot.food_planner import (
+            build_food_plans,
+            choose_food_plan,
+            simulate_path_to_food,
+        )
         from snake_bot.snake_state import parse_state
-        before = state(shot_food=frozenset({(5, 6)}), multipliers={'A': 3, 'B': 1})
+
+        before = state(
+            shot_food=frozenset({(5, 6)}), multipliers={'A': 3, 'B': 1}
+        )
         parsed = parse_state(bot_lab.make_turn_data(before, 'shot-plan', 0))
         self.assertFalse(parsed.food)
         plans = build_food_plans(parsed, 'A')
@@ -171,10 +279,18 @@ class CompactV89Tests(unittest.TestCase):
         self.assertEqual(len(after.body('A')), len(parsed.body('A')) + 1)
         self.assertFalse(after.shot_food)
 
-    def test_search_prices_stationary_shoot_at_last_turn_without_move_point(self):
-        before = state(rows=8, cols=12, scores={'A': 5000, 'B': 1}, remaining_moves=1)
-        engine, compact = IterativeSearchEngine.from_game_state(before, time_budget_ms=1000, max_depth=2)
-        result = engine.search(compact, 'A', [('move', 'down'), ('shoot', 'right')])
+    def test_search_prices_stationary_shoot_at_last_turn_without_move_point(
+        self,
+    ):
+        before = state(
+            rows=8, cols=12, scores={'A': 5000, 'B': 1}, remaining_moves=1
+        )
+        engine, compact = IterativeSearchEngine.from_game_state(
+            before, time_budget_ms=1000, max_depth=2
+        )
+        result = engine.search(
+            compact, 'A', [('move', 'down'), ('shoot', 'right')]
+        )
         self.assertGreater(result.scores['down'], 0)
         self.assertLess(result.scores[('shoot', 'right')], 0)
         shot = engine.apply_action(compact, 'shoot', 'right')
@@ -203,10 +319,16 @@ class CompactV89Tests(unittest.TestCase):
         self.assertFalse(replenished.shot_food)
         self.assertTrue(replenished.food_values)
         self.assertEqual(replenished.scores['A'], 6100)
+
     def test_multi_step_path_preserves_bombs_and_unconsumed_shot_food(self):
         from snake_bot.food_planner import simulate_path_to_food
-        before = state(bombs_large=frozenset({(12, 12)}), bombs_small=frozenset({(15, 15)}),
-                       shot_food=frozenset({(5, 7), (2, 2)}), pending_bomb_respawns=('small',))
+
+        before = state(
+            bombs_large=frozenset({(12, 12)}),
+            bombs_small=frozenset({(15, 15)}),
+            shot_food=frozenset({(5, 7), (2, 2)}),
+            pending_bomb_respawns=('small',),
+        )
         after = simulate_path_to_food(before, 'A', ((5, 5), (5, 6), (5, 7)))
         self.assertEqual(after.scores['A'], 6101)
         self.assertEqual(after.bombs_large, before.bombs_large)
@@ -214,12 +336,29 @@ class CompactV89Tests(unittest.TestCase):
         self.assertEqual(after.shot_food, frozenset({(2, 2)}))
         self.assertEqual(after.pending_bomb_respawns, ('small',))
 
-    def test_shot_food_uses_existing_lost_race_risk_with_numbered_food_present(self):
+    def test_shot_food_uses_existing_lost_race_risk_with_numbered_food_present(
+        self,
+    ):
         from snake_bot.food_planner import hot_lost_food_penalty
-        before = state(rows=15, cols=15, side='B', enemy='A', scores={'A': 0, 'B': 0},
-                       snakes={'A': ((9, 9), (9, 8), (9, 7)), 'B': ((8, 9), (8, 8), (8, 7))},
-                       shot_food=frozenset({(9, 10), (10, 10), (14, 6)}))
+
+        before = state(
+            rows=15,
+            cols=15,
+            side='B',
+            enemy='A',
+            scores={'A': 0, 'B': 0},
+            snakes={
+                'A': ((9, 9), (9, 8), (9, 7)),
+                'B': ((8, 9), (8, 8), (8, 7)),
+            },
+            shot_food=frozenset({(9, 10), (10, 10), (14, 6)}),
+        )
         self.assertGreater(hot_lost_food_penalty(before, 'B', 'right'), 0)
-        mixed = replace(before, food_values={(0, 0): 1}, food=frozenset({(0, 0)}), next_food_digit=1)
+        mixed = replace(
+            before,
+            food_values={(0, 0): 1},
+            food=frozenset({(0, 0)}),
+            next_food_digit=1,
+        )
         self.assertGreater(hot_lost_food_penalty(mixed, 'B', 'right'), 0)
         self.assertEqual(hot_lost_food_penalty(mixed, 'B', 'up'), 0)

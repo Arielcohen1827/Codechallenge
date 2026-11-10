@@ -1,4 +1,5 @@
 """Real-turn history must not invent an unobserved first crash."""
+
 from dataclasses import replace
 import asyncio
 import io
@@ -25,9 +26,11 @@ def snapshot(remaining=400, side='A', game_id='one', a=0, b=0,
 
 class V7HistoryTests(unittest.TestCase):
     def test_known_start_and_first_b_turn(self):
-        for side, remaining, expected in (('A', 400, (False, False)),
-                                           ('B', 399, (None, False)),
-                                           ('A', 350, (None, None))):
+        for side, remaining, expected in (
+            ('A', 400, (False, False)),
+            ('B', 399, (None, False)),
+            ('A', 350, (None, None)),
+        ):
             state = SnakeBrain().observe_state(snapshot(remaining, side))
             self.assertEqual((state.crashed_a, state.crashed_b), expected)
 
@@ -38,23 +41,29 @@ class V7HistoryTests(unittest.TestCase):
         brain.current_states['one'] = replace(state, walls=frozenset({(1, 2)}))
         brain.commit_move(data, 'up')
         self.assertIs(brain.crash_history['one']['A'], False)
-        observed = brain.observe_state(snapshot(398, a=0, b=1,
-            body_b=((3, 4), (4, 4), (4, 5))))
+        observed = brain.observe_state(
+            snapshot(398, a=0, b=1, body_b=((3, 4), (4, 4), (4, 5)))
+        )
         self.assertIs(observed.crashed_a, True)
         self.assertIs(observed.crashed_b, False)
         self.assertEqual(observed.scores['A'], 0)
 
     def test_unknown_positive_crash_commit_does_not_guess_score(self):
         brain = SnakeBrain()
-        data = snapshot(350, a=800,
-                        body_a=((0, 2), (0, 1), (0, 0), (1, 0)))
+        data = snapshot(350, a=800, body_a=((0, 2), (0, 1), (0, 0), (1, 0)))
         brain.observe_state(data)
         brain.commit_move(data, 'up')
         self.assertIsNone(brain.crash_history['one']['A'])
         self.assertEqual(brain.observed_states['one'].scores['A'], 800)
-        after = brain.observe_state(snapshot(348, a=300, b=1,
-            body_a=((0, 2), (0, 1), (0, 0)),
-            body_b=((3, 4), (4, 4), (4, 5))))
+        after = brain.observe_state(
+            snapshot(
+                348,
+                a=300,
+                b=1,
+                body_a=((0, 2), (0, 1), (0, 0)),
+                body_b=((3, 4), (4, 4), (4, 5)),
+            )
+        )
         self.assertIs(after.crashed_a, True)
         self.assertEqual(after.scores['A'], 300)
 
@@ -63,8 +72,9 @@ class V7HistoryTests(unittest.TestCase):
         data = snapshot()
         brain.observe_state(data)
         brain.commit_move(data, 'up')
-        after = brain.observe_state(snapshot(398, a=1, b=-500,
-            body_a=((1, 2), (2, 2), (2, 1))))
+        after = brain.observe_state(
+            snapshot(398, a=1, b=-500, body_a=((1, 2), (2, 2), (2, 1)))
+        )
         self.assertIs(after.crashed_b, True)
         self.assertIs(after.crashed_a, False)
 
@@ -77,29 +87,42 @@ class V7HistoryTests(unittest.TestCase):
         self.assertIs(after.crashed_b, True)
 
     def test_unexplained_movement_cannot_preserve_false(self):
-        for after in (((0, 2), (0, 1), (0, 0)),
-                      ((1, 2), (2, 2), (2, 1))):
+        for after in (((0, 2), (0, 1), (0, 0)), ((1, 2), (2, 2), (2, 1))):
             brain = SnakeBrain()
-            brain.observe_state(snapshot(body_a=((2, 2), (2, 1), (2, 0), (3, 0))))
-            state = brain.observe_state(snapshot(398, a=1, body_a=after,
-                body_b=((3, 4), (4, 4), (4, 5))))
+            brain.observe_state(
+                snapshot(body_a=((2, 2), (2, 1), (2, 0), (3, 0)))
+            )
+            state = brain.observe_state(
+                snapshot(
+                    398, a=1, body_a=after, body_b=((3, 4), (4, 4), (4, 5))
+                )
+            )
             self.assertIsNone(state.crashed_a)
 
     def test_shrink_across_gap_proves_a_crash(self):
         brain = SnakeBrain()
         brain.observe_state(snapshot(body_a=((2, 2), (2, 1), (2, 0), (3, 0))))
-        state = brain.observe_state(snapshot(390, a=5,
-            body_a=((1, 2), (1, 1), (1, 0))))
+        state = brain.observe_state(
+            snapshot(390, a=5, body_a=((1, 2), (1, 1), (1, 0)))
+        )
         self.assertIs(state.crashed_a, True)
 
-    def test_server_contradicts_prediction_without_becoming_confirmed_false(self):
+    def test_server_contradicts_prediction_without_becoming_confirmed_false(
+        self,
+    ):
         brain = SnakeBrain()
         data = snapshot()
         brain.observe_state(data)
         brain.commit_move(data, 'up')
-        state = brain.observe_state(snapshot(398, a=1, b=1,
-            body_a=((3, 2), (2, 2), (2, 1)),
-            body_b=((3, 4), (4, 4), (4, 5))))
+        state = brain.observe_state(
+            snapshot(
+                398,
+                a=1,
+                b=1,
+                body_a=((3, 2), (2, 2), (2, 1)),
+                body_b=((3, 4), (4, 4), (4, 5)),
+            )
+        )
         self.assertEqual(state.head('A'), (3, 2))
         self.assertIsNone(state.crashed_a)
 
@@ -136,9 +159,15 @@ class V7HistoryTests(unittest.TestCase):
         self.assertIs(brain.observed_states['one'], state)
         self.assertEqual(brain.previous_snakes['one'], predicted)
         self.assertEqual(brain.pending_moves['one'], pending)
-        valid = brain.observe_state(snapshot(396, a=1, b=1,
-            body_a=((1, 2), (2, 2), (2, 1)),
-            body_b=((3, 4), (4, 4), (4, 5))))
+        valid = brain.observe_state(
+            snapshot(
+                396,
+                a=1,
+                b=1,
+                body_a=((1, 2), (2, 2), (2, 1)),
+                body_b=((3, 4), (4, 4), (4, 5)),
+            )
+        )
         self.assertEqual(valid.remaining_moves, 396)
         self.assertNotIn('one', brain.pending_moves)
 

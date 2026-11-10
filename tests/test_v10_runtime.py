@@ -1,13 +1,10 @@
 """Runtime observations and lab RNG share the official v10 state semantics."""
-import asyncio
+
 from dataclasses import replace
-import json
 import random
 import unittest
-from unittest.mock import AsyncMock, patch
 
-import run
-from snake_bot.snake_brain import SnakeBrain, final_safe_direction
+from snake_bot.snake_brain import SnakeBrain
 from snake_bot.snake_state import GameState, apply_action, parse_state
 from tools import bot_lab
 from tools.analyze_matches import state_signature
@@ -15,11 +12,23 @@ from v7_logging import safe_message, sent_prediction, verification_record
 
 
 def position(**changes):
-    state = GameState(rows=12, cols=12, board=(), side='A', enemy='B',
-        snakes={'A': ((4, 4), (4, 3), (4, 2), (4, 1)),
-                'B': ((4, 7), (5, 7), (6, 7), (7, 7))},
-        food=frozenset(), scores={'A': 6000, 'B': 700}, remaining_moves=400,
-        reliable_tails=frozenset({'A', 'B'}), crashed_a=False, crashed_b=False)
+    state = GameState(
+        rows=12,
+        cols=12,
+        board=(),
+        side='A',
+        enemy='B',
+        snakes={
+            'A': ((4, 4), (4, 3), (4, 2), (4, 1)),
+            'B': ((4, 7), (5, 7), (6, 7), (7, 7)),
+        },
+        food=frozenset(),
+        scores={'A': 6000, 'B': 700},
+        remaining_moves=400,
+        reliable_tails=frozenset({'A', 'B'}),
+        crashed_a=False,
+        crashed_b=False,
+    )
     return replace(state, **changes)
 
 
@@ -213,12 +222,22 @@ class RuntimeV10Tests(unittest.TestCase):
 
 class LabV10Tests(unittest.TestCase):
     def test_spawn_food_reserves_star_cells_and_frenzy_refills_ten(self):
-        state = position(remaining_moves=100, pending_star_spawns=9,
-                         stars=frozenset({(0, 0)}), invincible_a=7, invincible_b=8)
-        result = bot_lab.spawn_food(state, random.Random(33), 2, pickup_count=1)
+        state = position(
+            remaining_moves=100,
+            pending_star_spawns=9,
+            stars=frozenset({(0, 0)}),
+            invincible_a=7,
+            invincible_b=8,
+        )
+        result = bot_lab.spawn_food(
+            state, random.Random(33), 2, pickup_count=1
+        )
         self.assertEqual(len(result.stars), 10)
         self.assertEqual(result.pending_star_spawns, 0)
-        self.assertFalse(result.stars & (set(result.food_values) | result.pickups | result.occupied()))
+        self.assertFalse(
+            result.stars
+            & (set(result.food_values) | result.pickups | result.occupied())
+        )
         self.assertEqual((result.invincible_a, result.invincible_b), (7, 8))
 
     def test_normal_star_rng_only_selects_nearest_equidistant_candidate(self):
@@ -231,13 +250,23 @@ class LabV10Tests(unittest.TestCase):
         result = bot_lab.spawn_food(blocked, random.Random(19), 0, pickup_count=0)
         self.assertFalse(result.stars)
 
-    def test_invincible_wall_and_ram_are_not_lab_crashes_even_with_prior_crash(self):
+    def test_invincible_wall_and_ram_are_not_lab_crashes_even_with_prior_crash(
+        self,
+    ):
         for kind in ('wall', 'ram'):
             with self.subTest(kind=kind):
-                state = position(invincible_a=3, crashed_a=True,
-                    walls=frozenset({(3, 4)}) if kind == 'wall' else frozenset(),
-                    snakes={'A': ((4, 4), (4, 3)),
-                            'B': ((3, 4), (3, 5), (3, 6))} if kind == 'ram' else position().snakes)
+                state = position(
+                    invincible_a=3,
+                    crashed_a=True,
+                    walls=(
+                        frozenset({(3, 4)}) if kind == 'wall' else frozenset()
+                    ),
+                    snakes=(
+                        {'A': ((4, 4), (4, 3)), 'B': ((3, 4), (3, 5), (3, 6))}
+                        if kind == 'ram'
+                        else position().snakes
+                    ),
+                )
                 after, events = bot_lab.lab_transition(state, 'up')
                 self.assertEqual(events['total_crashes_A'], 0)
                 self.assertEqual(events['wall_hits_A'], 0)

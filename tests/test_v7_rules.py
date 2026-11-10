@@ -1,9 +1,16 @@
 """Official v7 transition contracts, independent of strategic search."""
+
 from dataclasses import replace
 import unittest
 
 from snake_bot import game_rules as rules
-from snake_bot.snake_state import GameState, apply_move, parse_state, track_snake, legal_moves
+from snake_bot.snake_state import (
+    GameState,
+    apply_move,
+    parse_state,
+    track_snake,
+    legal_moves,
+)
 from snake_bot.search_engine import IterativeSearchEngine
 
 
@@ -73,16 +80,27 @@ class V7RulesTests(unittest.TestCase):
         rival = ((5, 4), (5, 5), (5, 6))
         direction, walls = 'up', frozenset()
         if kind == 'border':
-            body = tuple((r - 2, c) for r, c in ((2, 2), (3, 2), (3, 1), (4, 1), (4, 2))[:length])
+            body = tuple(
+                (r - 2, c)
+                for r, c in ((2, 2), (3, 2), (3, 1), (4, 1), (4, 2))[:length]
+            )
         elif kind == 'rival':
             body = ((2, 2), (2, 1), (2, 0), (3, 0), (3, 1))[:length]
             rival = ((1, 2), (1, 3), (1, 4))
         elif kind == 'wall':
             body = ((2, 2), (2, 1), (2, 0), (3, 0), (3, 1))[:length]
             walls = frozenset({(1, 2), (0, 6)})
-        state = fixture(side, snakes={side: body, enemy: rival}, walls=walls,
-                        scores={side: score, enemy: 37},
-                        **({'crashed_a': crashed} if side == 'A' else {'crashed_b': crashed}))
+        state = fixture(
+            side,
+            snakes={side: body, enemy: rival},
+            walls=walls,
+            scores={side: score, enemy: 37},
+            **(
+                {'crashed_a': crashed}
+                if side == 'A'
+                else {'crashed_b': crashed}
+            ),
+        )
         after = self.transition(state, direction)
         self.assertEqual(after.body(side), body[:3])
         tail = after.tail_food_b if side == 'A' else after.tail_food_a
@@ -94,12 +112,24 @@ class V7RulesTests(unittest.TestCase):
         engine, before = IterativeSearchEngine.from_game_state(state)
         compact_after = engine.apply_move(before, direction)
         index = 0 if side == 'A' else 1
-        self.assertEqual(compact_after.bodies[index], tuple(engine.index(cell) for cell in body[:3]))
-        self.assertEqual(getattr(compact_after, 'tail_food_b' if side == 'A' else 'tail_food_a'),
-                         tuple(sorted(engine.index(cell) for cell in body[3:])))
+        self.assertEqual(
+            compact_after.bodies[index],
+            tuple(engine.index(cell) for cell in body[:3]),
+        )
+        self.assertEqual(
+            getattr(
+                compact_after, 'tail_food_b' if side == 'A' else 'tail_food_a'
+            ),
+            tuple(sorted(engine.index(cell) for cell in body[3:])),
+        )
         self.assertEqual(compact_after.scores[1 - index], 37)
-        self.assertEqual(compact_after.scores[index], 0 if score > 0 and not crashed else score - 500)
-        self.assertTrue(compact_after.crashed_a if side == 'A' else compact_after.crashed_b)
+        self.assertEqual(
+            compact_after.scores[index],
+            0 if score > 0 and not crashed else score - 500,
+        )
+        self.assertTrue(
+            compact_after.crashed_a if side == 'A' else compact_after.crashed_b
+        )
         return after
 
     def test_border_crash_both_players(self):
@@ -125,12 +155,26 @@ class V7RulesTests(unittest.TestCase):
 
     def test_detached_tail_preserves_existing_food(self):
         for side in ('A', 'B'):
-            state = fixture(side, tail_food_a=frozenset({(0, 0)}), tail_food_b=frozenset({(0, 1)}),
-                            snakes={side: ((2, 2), (2, 1), (1, 1), (1, 2), (1, 3)),
-                                    ('B' if side == 'A' else 'A'): ((5, 5),)})
+            state = fixture(
+                side,
+                tail_food_a=frozenset({(0, 0)}),
+                tail_food_b=frozenset({(0, 1)}),
+                snakes={
+                    side: ((2, 2), (2, 1), (1, 1), (1, 2), (1, 3)),
+                    ('B' if side == 'A' else 'A'): ((5, 5),),
+                },
+            )
             after = self.transition(state, 'up')
-            self.assertEqual(after.tail_food_a, state.tail_food_a | ({(1, 2), (1, 3)} if side == 'B' else set()))
-            self.assertEqual(after.tail_food_b, state.tail_food_b | ({(1, 2), (1, 3)} if side == 'A' else set()))
+            self.assertEqual(
+                after.tail_food_a,
+                state.tail_food_a
+                | ({(1, 2), (1, 3)} if side == 'B' else set()),
+            )
+            self.assertEqual(
+                after.tail_food_b,
+                state.tail_food_b
+                | ({(1, 2), (1, 3)} if side == 'A' else set()),
+            )
 
     def test_first_positive_crash_resets_to_zero(self):
         for score in (1, 1700):
@@ -146,7 +190,12 @@ class V7RulesTests(unittest.TestCase):
 
     def test_later_crash_always_costs_500(self):
         for score in (1200, 0, -100):
-            self.assertEqual(self.crash_case('border', score=score, crashed=True).scores['A'], score - 500)
+            self.assertEqual(
+                self.crash_case('border', score=score, crashed=True).scores[
+                    'A'
+                ],
+                score - 500,
+            )
 
     def test_elimination_is_strict_and_attributed_to_loser(self):
         for side in ('A', 'B'):
@@ -200,18 +249,36 @@ class V7RulesTests(unittest.TestCase):
                 target = (2, 3) if side == 'A' else (5, 3)
                 field = 'tail_food_a' if side == 'A' else 'tail_food_b'
                 enemy = 'B' if side == 'A' else 'A'
-                state = fixture(side, multipliers={side: multiplier, enemy: multiplier + 4},
-                                **{field: frozenset({target, (0, 0)})})
-                after = self.transition(state, 'right' if side == 'A' else 'left')
-                self.assertEqual(after.scores[side], state.scores[side] + 100 * multiplier)
-                self.assertEqual(after.body(side), (target,) + state.body(side))
+                state = fixture(
+                    side,
+                    multipliers={side: multiplier, enemy: multiplier + 4},
+                    **{field: frozenset({target, (0, 0)})},
+                )
+                after = self.transition(
+                    state, 'right' if side == 'A' else 'left'
+                )
+                self.assertEqual(
+                    after.scores[side], state.scores[side] + 100 * multiplier
+                )
+                self.assertEqual(
+                    after.body(side), (target,) + state.body(side)
+                )
                 self.assertEqual(getattr(after, field), frozenset({(0, 0)}))
                 engine, compact = IterativeSearchEngine.from_game_state(state)
-                actual = engine.apply_move(compact, 'right' if side == 'A' else 'left')
+                actual = engine.apply_move(
+                    compact, 'right' if side == 'A' else 'left'
+                )
                 index = 0 if side == 'A' else 1
-                self.assertEqual(actual.scores[index], state.scores[side] + 100 * multiplier)
-                self.assertEqual(actual.bodies[index], (engine.index(target),) + compact.bodies[index])
-                self.assertEqual(getattr(actual, field), (engine.index((0, 0)),))
+                self.assertEqual(
+                    actual.scores[index], state.scores[side] + 100 * multiplier
+                )
+                self.assertEqual(
+                    actual.bodies[index],
+                    (engine.index(target),) + compact.bodies[index],
+                )
+                self.assertEqual(
+                    getattr(actual, field), (engine.index((0, 0)),)
+                )
 
     def test_originator_clears_only_touched_cell_with_normal_score(self):
         for side in ('A', 'B'):
@@ -234,11 +301,19 @@ class V7RulesTests(unittest.TestCase):
 
     def test_number_and_x_preserve_both_tail_food_sets(self):
         for pickup in (False, True):
-            state = fixture(tail_food_a=frozenset({(0, 0)}), tail_food_b=frozenset({(0, 1)}),
-                            food=frozenset({(2, 3)}) if not pickup else frozenset({(0, 2)}),
-                            food_values={(2, 3): 1, (0, 2): 2} if not pickup else {(0, 2): 1},
-                            next_food_digit=1, pickups=frozenset({(2, 3)}) if pickup else frozenset(),
-                            walls=frozenset({(6, 0)}))
+            state = fixture(
+                tail_food_a=frozenset({(0, 0)}),
+                tail_food_b=frozenset({(0, 1)}),
+                food=(
+                    frozenset({(2, 3)}) if not pickup else frozenset({(0, 2)})
+                ),
+                food_values=(
+                    {(2, 3): 1, (0, 2): 2} if not pickup else {(0, 2): 1}
+                ),
+                next_food_digit=1,
+                pickups=frozenset({(2, 3)}) if pickup else frozenset(),
+                walls=frozenset({(6, 0)}),
+            )
             after = self.transition(state, 'right')
             self.assertEqual(after.tail_food_a, state.tail_food_a)
             self.assertEqual(after.tail_food_b, state.tail_food_b)
@@ -258,23 +333,43 @@ class V7RulesTests(unittest.TestCase):
                 with self.subTest(side=side, reliable=reliable):
                     enemy = 'B' if side == 'A' else 'A'
                     body = ((2, 2), (2, 1), (1, 1), (1, 2))
-                    state = fixture(side, snakes={side: body, enemy: ((5, 5),)},
-                                    reliable_tails=frozenset({side}) if reliable else frozenset())
-                    engine, compact = IterativeSearchEngine.from_game_state(state)
+                    state = fixture(
+                        side,
+                        snakes={side: body, enemy: ((5, 5),)},
+                        reliable_tails=(
+                            frozenset({side}) if reliable else frozenset()
+                        ),
+                    )
+                    engine, compact = IterativeSearchEngine.from_game_state(
+                        state
+                    )
                     self.assertEqual('up' in legal_moves(state), reliable)
-                    self.assertEqual('up' in engine.legal_moves(compact), reliable)
+                    self.assertEqual(
+                        'up' in engine.legal_moves(compact), reliable
+                    )
                     after = self.transition(state, 'up')
                     expected = ((1, 2), (2, 2), (2, 1), (1, 1))
                     self.assertEqual(after.body(side), expected)
-                    self.assertEqual(after.scores[side], state.scores[side] + 1)
-                    self.assertFalse(after.crashed_a if side == 'A' else after.crashed_b)
+                    self.assertEqual(
+                        after.scores[side], state.scores[side] + 1
+                    )
+                    self.assertFalse(
+                        after.crashed_a if side == 'A' else after.crashed_b
+                    )
                     self.assertEqual(after.tail_food_a, frozenset())
                     self.assertEqual(after.tail_food_b, frozenset())
                     actual = engine.apply_move(compact, 'up')
                     index = 0 if side == 'A' else 1
-                    self.assertEqual(actual.bodies[index], tuple(engine.index(cell) for cell in expected))
-                    self.assertEqual(actual.scores[index], state.scores[side] + 1)
-                    self.assertFalse(actual.crashed_a if side == 'A' else actual.crashed_b)
+                    self.assertEqual(
+                        actual.bodies[index],
+                        tuple(engine.index(cell) for cell in expected),
+                    )
+                    self.assertEqual(
+                        actual.scores[index], state.scores[side] + 1
+                    )
+                    self.assertFalse(
+                        actual.crashed_a if side == 'A' else actual.crashed_b
+                    )
 
     def test_compact_hash_and_side_copy_preserve_history_and_tail_identity(self):
         engine, compact = IterativeSearchEngine.from_game_state(fixture(

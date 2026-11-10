@@ -50,18 +50,33 @@ class LabStateTests(unittest.TestCase):
         self.assertIn('|*     |', lab.render_board(state(food=frozenset({(0, 0)}))))
         self.assertNotIn('*', lab.render_board(state()))
 
-    def test_spawn_numbered_food_preserves_copy_targets_and_occupied_cells(self):
-        original = state(food_values={(0, 0): 9}, food=frozenset({(0, 0)}),
-                         next_food_digit=9, food_copy_targets={9: 3, 1: 4})
+    def test_spawn_numbered_food_preserves_copy_targets_and_occupied_cells(
+        self,
+    ):
+        original = state(
+            food_values={(0, 0): 9},
+            food=frozenset({(0, 0)}),
+            next_food_digit=9,
+            food_copy_targets={9: 3, 1: 4},
+        )
         spawned = lab.spawn_food(original, random.Random(4), 2)
         self.assertEqual(spawned.food_copy_targets, {9: 3, 1: 4})
         self.assertEqual(list(spawned.food_values.values()).count(9), 3)
         self.assertEqual(list(spawned.food_values.values()).count(1), 4)
-        self.assertEqual(spawned.food, frozenset(p for p, d in spawned.food_values.items() if d == 9))
-        items = set(spawned.food_values) | set(spawned.pickups) | set(spawned.walls)
+        self.assertEqual(
+            spawned.food,
+            frozenset(p for p, d in spawned.food_values.items() if d == 9),
+        )
+        items = (
+            set(spawned.food_values)
+            | set(spawned.pickups)
+            | set(spawned.walls)
+        )
         self.assertTrue(items.isdisjoint(original.occupied()))
         self.assertEqual(len(spawned.pickups), 2)
-        self.assertEqual(spawned, lab.spawn_food(original, random.Random(4), 2))
+        self.assertEqual(
+            spawned, lab.spawn_food(original, random.Random(4), 2)
+        )
 
     def test_spawn_legacy_food_and_full_board_stop_at_available_space(self):
         original = state(walls=frozenset({(0, 0)}))
@@ -77,11 +92,19 @@ class LabStateTests(unittest.TestCase):
         self.assertFalse(spawned.walls)
 
     def test_spawn_wall_requires_contiguous_odd_length_available_cells(self):
-        for cells, rows, cols in [([(0, i) for i in range(3)], 1, 3),
-                                  ([(i, 0) for i in range(3)], 3, 1)]:
+        for cells, rows, cols in [
+            ([(0, i) for i in range(3)], 1, 3),
+            ([(i, 0) for i in range(3)], 3, 1),
+        ]:
             with self.subTest(cells=cells):
-                self.assertEqual(lab.spawn_wall(cells, rows, cols, random.Random(1)), frozenset(cells))
-        self.assertEqual(lab.spawn_wall([(0, 0), (0, 2)], 1, 3, random.Random(1)), frozenset())
+                self.assertEqual(
+                    lab.spawn_wall(cells, rows, cols, random.Random(1)),
+                    frozenset(cells),
+                )
+        self.assertEqual(
+            lab.spawn_wall([(0, 0), (0, 2)], 1, 3, random.Random(1)),
+            frozenset(),
+        )
 
     def test_initial_state_dimensions_bodies_and_reproducibility(self):
         for numbered in (True, False):
@@ -95,12 +118,16 @@ class LabStateTests(unittest.TestCase):
                 self.assertEqual(initial.next_food_digit, 1 if numbered else None)
 
     def test_winner_uses_scores_ignoring_legacy_dead_side(self):
-        for scores, dead, expected in [({'A': 1, 'B': 0}, None, 'A'),
-                                      ({'A': 0, 'B': 1}, None, 'B'),
-                                      ({'A': 1, 'B': 1}, None, None),
-                                      ({'A': 999, 'B': 0}, 'A', 'A'),
-                                      ({'A': 0, 'B': 999}, 'B', 'B')]:
-            self.assertEqual(lab.winner_for(state(scores=scores), dead), expected)
+        for scores, dead, expected in [
+            ({'A': 1, 'B': 0}, None, 'A'),
+            ({'A': 0, 'B': 1}, None, 'B'),
+            ({'A': 1, 'B': 1}, None, None),
+            ({'A': 999, 'B': 0}, 'A', 'A'),
+            ({'A': 0, 'B': 999}, 'B', 'B'),
+        ]:
+            self.assertEqual(
+                lab.winner_for(state(scores=scores), dead), expected
+            )
 
 
 class SimulationTests(unittest.TestCase):
@@ -114,11 +141,20 @@ class SimulationTests(unittest.TestCase):
         bot_weights.ACTIVE_WEIGHTS.update(previous)
 
     def test_simulation_counts_food_pickup_wrong_digit_and_wall_events(self):
-        cases = [({'food': frozenset({(2, 3)})}, 'foods_a', 100),
-                 ({'pickups': frozenset({(2, 3)})}, 'pickups_a', 50),
-                 ({'food_values': {(2, 3): 2, (0, 0): 1}, 'next_food_digit': 1,
-                   'food': frozenset({(0, 0)})}, 'wrong_digits_a', -500),
-                 ({'walls': frozenset({(2, 3)})}, 'wall_hits_a', -500)]
+        cases = [
+            ({'food': frozenset({(2, 3)})}, 'foods_a', 100),
+            ({'pickups': frozenset({(2, 3)})}, 'pickups_a', 50),
+            (
+                {
+                    'food_values': {(2, 3): 2, (0, 0): 1},
+                    'next_food_digit': 1,
+                    'food': frozenset({(0, 0)}),
+                },
+                'wrong_digits_a',
+                -500,
+            ),
+            ({'walls': frozenset({(2, 3)})}, 'wall_hits_a', -500),
+        ]
         for changes, counter, score in cases:
             with self.subTest(counter=counter):
                 brain = Mock()
@@ -129,11 +165,28 @@ class SimulationTests(unittest.TestCase):
                 brain.observe_state.return_value = state(**changes)
                 brain.choose_move.return_value = 'right'
                 brain.safe_direction.return_value = 'right'
-                brain.decision_debug.return_value = {'reason': 'advantage_control'}
-                with patch.object(lab, 'initial_state', return_value=state(**changes)), \
-                        patch.object(lab, 'SnakeBrain', return_value=brain), \
-                        patch.object(lab, 'spawn_food', side_effect=lambda current, *a: current):
-                    result = lab.simulate_game(17, 1, 5, 6, weights_by_side={'A': {}}, candidate_side='A')
+                brain.decision_debug.return_value = {
+                    'reason': 'advantage_control'
+                }
+                with (
+                    patch.object(
+                        lab, 'initial_state', return_value=state(**changes)
+                    ),
+                    patch.object(lab, 'SnakeBrain', return_value=brain),
+                    patch.object(
+                        lab,
+                        'spawn_food',
+                        side_effect=lambda current, *a: current,
+                    ),
+                ):
+                    result = lab.simulate_game(
+                        17,
+                        1,
+                        5,
+                        6,
+                        weights_by_side={'A': {}},
+                        candidate_side='A',
+                    )
                 self.assertEqual(getattr(result, counter), 1)
                 self.assertEqual(result.score_a, score)
                 self.assertEqual(result.control_moves_a, 1)
@@ -160,17 +213,38 @@ class SimulationTests(unittest.TestCase):
 
     def test_trapped_side_crash_consumes_turn_without_rewarding_rival(self):
         for side, scores, expected_scores, winner in [
-                ('A', {'A': 0, 'B': 0}, (-500, 0), 'B'),
-                ('B', {'A': 0, 'B': 0}, (0, -500), 'A'),
-                ('A', {'A': 1500, 'B': 0}, (0, 0), None)]:
-            with self.subTest(side=side, scores=scores), \
-                    patch.object(lab, 'initial_state', return_value=state(
-                        rows=2, cols=2, snakes={side: ((0, 0),),
-                            ('B' if side == 'A' else 'A'): ((0, 1), (1, 1), (1, 0))},
-                        side=side, enemy='B' if side == 'A' else 'A', scores=scores,
-                        crashed_a=False, crashed_b=False)):
+            ('A', {'A': 0, 'B': 0}, (-500, 0), 'B'),
+            ('B', {'A': 0, 'B': 0}, (0, -500), 'A'),
+            ('A', {'A': 1500, 'B': 0}, (0, 0), None),
+        ]:
+            with (
+                self.subTest(side=side, scores=scores),
+                patch.object(
+                    lab,
+                    'initial_state',
+                    return_value=state(
+                        rows=2,
+                        cols=2,
+                        snakes={
+                            side: ((0, 0),),
+                            ('B' if side == 'A' else 'A'): (
+                                (0, 1),
+                                (1, 1),
+                                (1, 0),
+                            ),
+                        },
+                        side=side,
+                        enemy='B' if side == 'A' else 'A',
+                        scores=scores,
+                        crashed_a=False,
+                        crashed_b=False,
+                    ),
+                ),
+            ):
                 result = lab.simulate_game(1, 1, 2, 2)
-                self.assertEqual((result.score_a, result.score_b), expected_scores)
+                self.assertEqual(
+                    (result.score_a, result.score_b), expected_scores
+                )
                 self.assertEqual(result.winner, winner)
                 self.assertIsNone(result.no_legal_side)
                 self.assertEqual(result.turns, 1)
@@ -232,14 +306,20 @@ class LabLogTests(unittest.TestCase):
             brain = Mock()
             brain.safe_direction.return_value = 'right'
             brain.decision_debug.return_value = {'reason': 'food_plan'}
-            with self.subTest(limit=limit), patch.object(lab, 'SnakeBrain', return_value=brain) as factory:
+            with (
+                self.subTest(limit=limit),
+                patch.object(lab, 'SnakeBrain', return_value=brain) as factory,
+            ):
                 result = lab.evaluate_log_decisions([self.log], limit)
             self.assertEqual(result['positions'], count)
             self.assertEqual(result['food_taken_now'], count)
             self.assertEqual(result['reasons'], {'food_plan': count})
             self.assertEqual(brain.commit_move.call_count, commits)
             self.assertEqual(factory.call_count, brains)
-            self.assertEqual(sum(v for k, v in result.items() if k.startswith('safety_')), count)
+            self.assertEqual(
+                sum(v for k, v in result.items() if k.startswith('safety_')),
+                count,
+            )
 
     def test_invalid_illegal_and_trapped_log_moves_are_counted(self):
         brain = Mock()
@@ -260,9 +340,15 @@ class LabLogTests(unittest.TestCase):
         brain = Mock()
         brain.safe_direction.return_value = 'right'
         brain.decision_debug.return_value = {}
-        with patch.object(lab, 'select_log_entries', return_value=([(self.log, 0, data)], False)), \
-                patch.object(lab, 'SnakeBrain', return_value=brain), \
-                patch.object(lab, 'position_control_penalty', return_value=1):
+        with (
+            patch.object(
+                lab,
+                'select_log_entries',
+                return_value=([(self.log, 0, data)], False),
+            ),
+            patch.object(lab, 'SnakeBrain', return_value=brain),
+            patch.object(lab, 'position_control_penalty', return_value=1),
+        ):
             result = lab.evaluate_log_decisions([self.log])
         self.assertEqual(result['wall_hit'], 1)
         self.assertEqual(result['edge_or_corner_move'], 1)
@@ -286,13 +372,36 @@ class LabLogTests(unittest.TestCase):
 class LabCliTests(unittest.TestCase):
     def test_simulate_cli_json_and_text_use_same_seed_sequence(self):
         for option in ([], ['--json']):
-            with patch('sys.argv', ['bot_lab', 'simulate', '--games', '2', '--seed', '9',
-                                    '--turns', '4', '--rows', '5', '--cols', '6'] + option), \
-                    patch.object(lab, 'load_active_weights') as load, \
-                    patch.object(lab, 'simulate_game', return_value=simulation_result()) as simulate, \
-                    contextlib.redirect_stdout(io.StringIO()) as out:
+            with (
+                patch(
+                    'sys.argv',
+                    [
+                        'bot_lab',
+                        'simulate',
+                        '--games',
+                        '2',
+                        '--seed',
+                        '9',
+                        '--turns',
+                        '4',
+                        '--rows',
+                        '5',
+                        '--cols',
+                        '6',
+                    ]
+                    + option,
+                ),
+                patch.object(lab, 'load_active_weights') as load,
+                patch.object(
+                    lab, 'simulate_game', return_value=simulation_result()
+                ) as simulate,
+                contextlib.redirect_stdout(io.StringIO()) as out,
+            ):
                 lab.main()
-            self.assertEqual([c.args for c in simulate.call_args_list], [(9, 4, 5, 6, 5), (10, 4, 5, 6, 5)])
+            self.assertEqual(
+                [c.args for c in simulate.call_args_list],
+                [(9, 4, 5, 6, 5), (10, 4, 5, 6, 5)],
+            )
             load.assert_called_once_with()
             if option:
                 self.assertEqual(json.loads(out.getvalue())['games'], 2)
@@ -302,11 +411,27 @@ class LabCliTests(unittest.TestCase):
 
     def test_logs_cli_forwards_limit_and_prints_summary(self):
         for option in ([], ['--json']):
-            with patch('sys.argv', ['bot_lab', 'logs', 'fixture.log', '--max-positions', '2'] + option), \
-                    patch.object(lab, 'load_active_weights'), \
-                    patch.object(lab, 'evaluate_log_decisions', return_value={'positions': 2}) as evaluate, \
-                    contextlib.redirect_stdout(io.StringIO()) as out:
+            with (
+                patch(
+                    'sys.argv',
+                    ['bot_lab', 'logs', 'fixture.log', '--max-positions', '2']
+                    + option,
+                ),
+                patch.object(lab, 'load_active_weights'),
+                patch.object(
+                    lab,
+                    'evaluate_log_decisions',
+                    return_value={'positions': 2},
+                ) as evaluate,
+                contextlib.redirect_stdout(io.StringIO()) as out,
+            ):
                 lab.main()
             evaluate.assert_called_once_with([Path('fixture.log')], 2)
-            self.assertEqual(json.loads(out.getvalue()) if option else out.getvalue().strip(),
-                             {'positions': 2} if option else 'positions: 2')
+            self.assertEqual(
+                (
+                    json.loads(out.getvalue())
+                    if option
+                    else out.getvalue().strip()
+                ),
+                {'positions': 2} if option else 'positions: 2',
+            )

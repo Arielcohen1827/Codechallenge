@@ -1,9 +1,15 @@
 """Official star/invincibility contracts against the shared transition engine."""
+
 from dataclasses import replace
 import unittest
 
 from snake_bot import snake_state as rules
-from snake_bot.snake_state import GameState, apply_action, apply_move, parse_state
+from snake_bot.snake_state import (
+    GameState,
+    apply_action,
+    apply_move,
+    parse_state,
+)
 
 
 def state(**changes):
@@ -129,10 +135,14 @@ class InvincibleCollisionTests(unittest.TestCase):
         self.assertEqual(normal.scores['A'], 6001)
 
     def test_border_wall_and_own_body_are_stationary_without_crash(self):
-        cases = (dict(snakes={'A': ((0, 5), (0, 4), (0, 3), (0, 2)),
-                             'B': ((5, 8),)}, direction='up'),
-                 dict(walls=frozenset({(5, 6)}), direction='right'),
-                 dict(direction='left'))
+        cases = (
+            dict(
+                snakes={'A': ((0, 5), (0, 4), (0, 3), (0, 2)), 'B': ((5, 8),)},
+                direction='up',
+            ),
+            dict(walls=frozenset({(5, 6)}), direction='right'),
+            dict(direction='left'),
+        )
         for case in cases:
             direction = case.pop('direction')
             with self.subTest(direction=direction, case=case):
@@ -170,22 +180,35 @@ class InvincibleCollisionTests(unittest.TestCase):
         self.assertEqual(after.next_food_digit, 2)
         self.assertEqual(after.food_copy_targets[4], 1)
 
-    def test_ram_cuts_normal_or_invincible_rival_for_free_and_filters_blasts(self):
+    def test_ram_cuts_normal_or_invincible_rival_for_free_and_filters_blasts(
+        self,
+    ):
         for rival_protection in (0, 12):
             for hit in ('head', 'body'):
                 with self.subTest(protected=rival_protection, hit=hit):
-                    rival = ((5, 6), (5, 7), (5, 8), (5, 9)) if hit == 'head' else (
-                        (6, 6), (5, 6), (5, 7), (5, 8))
-                    source = state(invincible_a=1, invincible_b=rival_protection,
-                                   snakes={'A': ((5, 5), (5, 4)), 'B': rival},
-                                   bombs_small=frozenset({(6, 8)}))
+                    rival = (
+                        ((5, 6), (5, 7), (5, 8), (5, 9))
+                        if hit == 'head'
+                        else ((6, 6), (5, 6), (5, 7), (5, 8))
+                    )
+                    source = state(
+                        invincible_a=1,
+                        invincible_b=rival_protection,
+                        snakes={'A': ((5, 5), (5, 4)), 'B': rival},
+                        bombs_small=frozenset({(6, 8)}),
+                    )
                     after = apply_move(source, 'right')
                     self.assertEqual(after.body('A'), source.body('A'))
                     self.assertEqual(after.body('B'), rival[:1])
                     self.assertEqual(after.scores, source.scores)
-                    self.assertEqual(after.shot_food, frozenset({(5, 6)}) if hit == 'body' else frozenset())
+                    self.assertEqual(
+                        after.shot_food,
+                        frozenset({(5, 6)}) if hit == 'body' else frozenset(),
+                    )
                     self.assertTrue(after.last_action['ram_cut'])
-                    self.assertEqual(after.last_action['ram_hit_coordinate'], (5, 6))
+                    self.assertEqual(
+                        after.last_action['ram_hit_coordinate'], (5, 6)
+                    )
                     self.assertEqual(after.last_action['cut_length'], 3)
                     self.assertEqual(after.last_action['shoot_cost'], 0)
                     self.assertFalse(after.crashed_a or after.crashed_b)

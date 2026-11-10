@@ -9,7 +9,6 @@ import typing
 import unittest
 from unittest.mock import patch
 
-
 ROOT = Path(__file__).resolve().parent.parent
 
 
@@ -64,18 +63,29 @@ class Python39CompatibilityTests(unittest.TestCase):
                 self.assertEqual(asdict(result), {'value': value})
                 self.assertEqual(replace(result, value=9).value, 9)
 
-    def test_state_import_with_legacy_annotations_preserves_food_and_normal_moves(self):
+    def test_state_import_with_legacy_annotations_preserves_food_and_normal_moves(
+        self,
+    ):
         with legacy_module('snake_bot.snake_state') as module:
-            for board, score, digit in [('|A* B|\n|    |', 100, None),
-                                        ('|A  B|\n|    |', 1, None),
-                                        ('|A12B|\n|    |', 100, 2)]:
+            for board, score, digit in [
+                ('|A* B|\n|    |', 100, None),
+                ('|A  B|\n|    |', 1, None),
+                ('|A12B|\n|    |', 100, 2),
+            ]:
                 with self.subTest(board=board):
-                    state = module.parse_state({'board': board, 'side': 'A', 'remaining_moves': 10})
+                    state = module.parse_state(
+                        {'board': board, 'side': 'A', 'remaining_moves': 10}
+                    )
                     moved = module.apply_move(state, 'right', 'A')
                     self.assertEqual(moved.head('A'), (0, 1))
                     self.assertEqual(moved.scores['A'], score)
                     self.assertEqual(moved.next_food_digit, digit)
-                    self.assertEqual(asdict(replace(moved, remaining_moves=3))['remaining_moves'], 3)
+                    self.assertEqual(
+                        asdict(replace(moved, remaining_moves=3))[
+                            'remaining_moves'
+                        ],
+                        3,
+                    )
 
     def test_planner_import_with_legacy_annotations_preserves_path_direction(self):
         with legacy_module('snake_bot.food_planner') as module:
@@ -102,14 +112,37 @@ class Python39CompatibilityTests(unittest.TestCase):
                 self.assertEqual(summary['draws'], 1)
                 self.assertEqual(summary['candidate_games'], int(candidate_side == 'A'))
 
-    @unittest.skipIf(sys.version_info < (3, 10), 'PEP 604 runtime type-hint resolution requires Python 3.10')
-    def test_native_type_hint_resolution_still_supports_dataclass_consumers(self):
-        cases = [('snake_bot.snake_state', 'GameState', {'next_food_digit': typing.Optional[int]}),
-                 ('snake_bot.food_planner', 'FoodPlan', {'enemy_distance': typing.Optional[int],
-                                                        'next_food_distance': typing.Optional[int]}),
-                 ('tools.bot_lab', 'SimResult', {'candidate_side': typing.Optional[str],
-                                               'winner': typing.Optional[str],
-                                               'no_legal_side': typing.Optional[str]})]
+    @unittest.skipIf(
+        sys.version_info < (3, 10),
+        'PEP 604 runtime type-hint resolution requires Python 3.10',
+    )
+    def test_native_type_hint_resolution_still_supports_dataclass_consumers(
+        self,
+    ):
+        cases = [
+            (
+                'snake_bot.snake_state',
+                'GameState',
+                {'next_food_digit': typing.Optional[int]},
+            ),
+            (
+                'snake_bot.food_planner',
+                'FoodPlan',
+                {
+                    'enemy_distance': typing.Optional[int],
+                    'next_food_distance': typing.Optional[int],
+                },
+            ),
+            (
+                'tools.bot_lab',
+                'SimResult',
+                {
+                    'candidate_side': typing.Optional[str],
+                    'winner': typing.Optional[str],
+                    'no_legal_side': typing.Optional[str],
+                },
+            ),
+        ]
         for module_name, class_name, expected in cases:
             cls = getattr(importlib.import_module(module_name), class_name)
             resolved = typing.get_type_hints(cls)

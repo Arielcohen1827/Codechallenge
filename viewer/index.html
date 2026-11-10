@@ -71,6 +71,16 @@
 
         <div class="play-area">
           <div class="board-shell">
+            <div id="cube-controls" hidden>
+              <label for="plane-select">Plano observado</label>
+              <select id="plane-select" aria-label="Plano observado">
+                <option value="z">Z · nivel</option>
+                <option value="y">Y · fila</option>
+                <option value="x">X · columna</option>
+              </select>
+              <p id="head-coordinate"></p>
+              <p id="visibility-note">Solo se muestran celdas observadas en los planos actuales.</p>
+            </div>
             <div id="board" class="board" role="img" aria-label="Tablero de la partida"></div>
           </div>
           <aside class="decision-panel">

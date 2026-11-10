@@ -1,9 +1,14 @@
 """Search and planning contracts for v10, independent of server RNG."""
+
 from dataclasses import replace
 import unittest
 
 from snake_bot import food_planner as planner
-from snake_bot.move_search import TurnSearchCache, state_key, static_after_move_score
+from snake_bot.move_search import (
+    TurnSearchCache,
+    state_key,
+    static_after_move_score,
+)
 from snake_bot.search_engine import IterativeSearchEngine
 from snake_bot.snake_state import GameState, apply_action
 
@@ -22,17 +27,28 @@ def snapshot(**changes):
 class CompactV10Tests(unittest.TestCase):
     def test_roundtrip_retains_observed_and_unknown_star_state(self):
         for side in ('A', 'B'):
-            state = snapshot(side=side, enemy='B' if side == 'A' else 'A',
-                stars=frozenset({(3, 3), (3, 7)}), invincible_a=50,
-                invincible_b=1, star_spawn_due_round=None, pending_star_spawns=2,
-                timeouts_a=3, timeouts_b=7)
+            state = snapshot(
+                side=side,
+                enemy='B' if side == 'A' else 'A',
+                stars=frozenset({(3, 3), (3, 7)}),
+                invincible_a=50,
+                invincible_b=1,
+                star_spawn_due_round=None,
+                pending_star_spawns=2,
+                timeouts_a=3,
+                timeouts_b=7,
+            )
             engine, compact = IterativeSearchEngine.from_game_state(state)
             restored = engine.to_game_state(compact)
             self.assertEqual(restored.stars, state.stars)
-            self.assertEqual((restored.invincible_a, restored.invincible_b), (50, 1))
+            self.assertEqual(
+                (restored.invincible_a, restored.invincible_b), (50, 1)
+            )
             self.assertEqual(restored.star_spawn_due_round, None)
             self.assertEqual(restored.pending_star_spawns, 2)
-            self.assertEqual((restored.timeouts_a, restored.timeouts_b), (3, 7))
+            self.assertEqual(
+                (restored.timeouts_a, restored.timeouts_b), (3, 7)
+            )
 
     def test_cache_keys_distinguish_counter_geometry_clock_and_timeouts(self):
         state = snapshot()
@@ -46,33 +62,60 @@ class CompactV10Tests(unittest.TestCase):
                 self.assertNotEqual(state_key(state), state_key(other))
                 self.assertNotEqual(compact, engine.to_compact(other))
 
-    def test_protected_moves_remain_four_directions_without_duplicate_ram(self):
+    def test_protected_moves_remain_four_directions_without_duplicate_ram(
+        self,
+    ):
         for side in ('A', 'B'):
-            state = snapshot(side=side, enemy='B' if side == 'A' else 'A',
-                invincible_a=3, invincible_b=3)
+            state = snapshot(
+                side=side,
+                enemy='B' if side == 'A' else 'A',
+                invincible_a=3,
+                invincible_b=3,
+            )
             engine, compact = IterativeSearchEngine.from_game_state(state)
-            self.assertEqual(set(engine.available_actions(compact)),
-                             {'up', 'down', 'left', 'right'})
-            self.assertEqual(set(TurnSearchCache().legal_actions(state, side)),
-                             {'up', 'down', 'left', 'right'})
+            self.assertEqual(
+                set(engine.available_actions(compact)),
+                {'up', 'down', 'left', 'right'},
+            )
+            self.assertEqual(
+                set(TurnSearchCache().legal_actions(state, side)),
+                {'up', 'down', 'left', 'right'},
+            )
 
-    def test_selective_shoots_omit_invincible_target_and_return_after_expiry(self):
+    def test_selective_shoots_omit_invincible_target_and_return_after_expiry(
+        self,
+    ):
         for side in ('A', 'B'):
-            state = snapshot(side=side, enemy='B' if side == 'A' else 'A',
+            state = snapshot(
+                side=side,
+                enemy='B' if side == 'A' else 'A',
                 invincible_a=5 if side == 'B' else 0,
-                invincible_b=5 if side == 'A' else 0)
+                invincible_b=5 if side == 'A' else 0,
+            )
             engine, compact = IterativeSearchEngine.from_game_state(state)
             self.assertEqual(engine.shoot_actions(compact), ())
-            self.assertFalse(any(isinstance(a, tuple)
-                for a in TurnSearchCache().legal_actions(state, side)))
+            self.assertFalse(
+                any(
+                    isinstance(a, tuple)
+                    for a in TurnSearchCache().legal_actions(state, side)
+                )
+            )
             normal = replace(state, invincible_a=0, invincible_b=0)
             self.assertTrue(engine.shoot_actions(engine.to_compact(normal)))
 
-    def test_compact_transitions_match_shared_engine_for_star_ram_shoot_and_expiry(self):
+    def test_compact_transitions_match_shared_engine_for_star_ram_shoot_and_expiry(
+        self,
+    ):
         cases = [
             (snapshot(stars=frozenset({(4, 4)})), 'move', 'right'),
-            (snapshot(invincible_a=2, snakes={'A': ((4, 7),),
-                'B': ((4, 8), (5, 8), (6, 8))}), 'move', 'right'),
+            (
+                snapshot(
+                    invincible_a=2,
+                    snakes={'A': ((4, 7),), 'B': ((4, 8), (5, 8), (6, 8))},
+                ),
+                'move',
+                'right',
+            ),
             (snapshot(invincible_a=2, invincible_b=2), 'shoot', 'right'),
             (snapshot(invincible_a=1), 'invalid', 'left'),
             (snapshot(invincible_a=1), 'timeout', None),
@@ -81,8 +124,12 @@ class CompactV10Tests(unittest.TestCase):
         for state, action, direction in cases:
             with self.subTest(action=action, direction=direction):
                 engine, compact = IterativeSearchEngine.from_game_state(state)
-                expected = engine.to_compact(apply_action(state, action, direction))
-                self.assertEqual(engine.apply_action(compact, action, direction), expected)
+                expected = engine.to_compact(
+                    apply_action(state, action, direction)
+                )
+                self.assertEqual(
+                    engine.apply_action(compact, action, direction), expected
+                )
 
     def test_wrong_digit_is_productive_only_during_protection(self):
         base = snapshot(food_values={(4, 4): 2, (3, 3): 1},
@@ -98,27 +145,45 @@ class CompactV10Tests(unittest.TestCase):
         engine, compact = IterativeSearchEngine.from_game_state(state)
         self.assertEqual(engine.productive_moves_for(compact, 0), ('right',))
 
-    def test_compact_preserves_numeric_copy_targets_for_wrong_digit_respawn(self):
-        state = snapshot(food_values={(4, 4): 2, (3, 3): 1},
-            food=frozenset({(3, 3)}), next_food_digit=1,
-            food_copy_targets={1: 4, 2: 5}, invincible_a=2)
+    def test_compact_preserves_numeric_copy_targets_for_wrong_digit_respawn(
+        self,
+    ):
+        state = snapshot(
+            food_values={(4, 4): 2, (3, 3): 1},
+            food=frozenset({(3, 3)}),
+            next_food_digit=1,
+            food_copy_targets={1: 4, 2: 5},
+            invincible_a=2,
+        )
         engine, compact = IterativeSearchEngine.from_game_state(state)
-        self.assertEqual(engine.to_game_state(compact).food_copy_targets, {1: 4, 2: 5})
+        self.assertEqual(
+            engine.to_game_state(compact).food_copy_targets, {1: 4, 2: 5}
+        )
         expected = engine.to_compact(apply_action(state, 'move', 'right'))
         self.assertEqual(engine.apply_move(compact, 'right'), expected)
 
-    def test_completed_deep_search_prices_star_and_free_ram_without_shoot_branch(self):
-        star = snapshot(remaining_moves=3, stars=frozenset({(3, 3)}),
-                        scores={'A': 100, 'B': 150})
+    def test_completed_deep_search_prices_star_and_free_ram_without_shoot_branch(
+        self,
+    ):
+        star = snapshot(
+            remaining_moves=3,
+            stars=frozenset({(3, 3)}),
+            scores={'A': 100, 'B': 150},
+        )
         engine, compact = IterativeSearchEngine.from_game_state(star, 1000, 3)
         result = engine.search(compact, 'A', ['up', 'right', 'down'])
         self.assertEqual(result.completed_depth, 3)
         self.assertGreater(result.scores['up'], result.scores['right'])
         self.assertGreater(result.scores['up'], result.scores['down'])
-        ram = snapshot(invincible_a=3, invincible_b=3,
-            snakes={'A': ((4, 7),), 'B': ((4, 8), (5, 8), (6, 8))})
+        ram = snapshot(
+            invincible_a=3,
+            invincible_b=3,
+            snakes={'A': ((4, 7),), 'B': ((4, 8), (5, 8), (6, 8))},
+        )
         engine, compact = IterativeSearchEngine.from_game_state(ram, 1000, 2)
-        result = engine.search(compact, 'A', list(('up', 'down', 'left', 'right')))
+        result = engine.search(
+            compact, 'A', list(('up', 'down', 'left', 'right'))
+        )
         self.assertEqual(set(result.scores), {'up', 'down', 'left', 'right'})
         self.assertEqual(len(engine.apply_move(compact, 'right').bodies[1]), 1)
 
@@ -134,15 +199,28 @@ class CompactV10Tests(unittest.TestCase):
 
 
 class StarPlanningTests(unittest.TestCase):
-    def test_real_policy_selects_body_ram_when_it_opens_our_food_before_rival_arrives(self):
+    def test_real_policy_selects_body_ram_when_it_opens_our_food_before_rival_arrives(
+        self,
+    ):
         from snake_bot.snake_brain import SnakeBrain
         from tools.bot_lab import make_turn_data, observe_simulation_state
-        state = snapshot(rows=20, cols=30, invincible_a=4, invincible_b=5,
-            remaining_moves=240, scores={'A': 6000, 'B': 7000},
-            snakes={'A': ((10, 5), (10, 4), (10, 3)),
-                    'B': ((12, 6), (11, 6), (10, 6), (9, 6), (8, 6))})
+
+        state = snapshot(
+            rows=20,
+            cols=30,
+            invincible_a=4,
+            invincible_b=5,
+            remaining_moves=240,
+            scores={'A': 6000, 'B': 7000},
+            snakes={
+                'A': ((10, 5), (10, 4), (10, 3)),
+                'B': ((12, 6), (11, 6), (10, 6), (9, 6), (8, 6)),
+            },
+        )
         brain = SnakeBrain(enable_debug=True)
-        brain.previous_snakes = {f'active_{i}': state.snakes for i in range(10)}
+        brain.previous_snakes = {
+            f'active_{i}': state.snakes for i in range(10)
+        }
         data = make_turn_data(state, 'v10-real-ram', 0)
         observe_simulation_state(brain, state, data)
         action = brain.choose_action(data)
@@ -165,18 +243,36 @@ class StarPlanningTests(unittest.TestCase):
         fresh = planner.star_strategic_points(state, 'A', 1, 6)
         self.assertGreater(fresh, 0)
         self.assertEqual(planner.star_strategic_points(state, 'A', 6, 1), 0)
-        self.assertLess(planner.star_strategic_points(replace(state, invincible_a=50), 'A', 1, 6), fresh)
-        self.assertEqual(planner.star_strategic_points(replace(state, remaining_moves=1), 'A', 1, 6), 0)
+        self.assertLess(
+            planner.star_strategic_points(
+                replace(state, invincible_a=50), 'A', 1, 6
+            ),
+            fresh,
+        )
+        self.assertEqual(
+            planner.star_strategic_points(
+                replace(state, remaining_moves=1), 'A', 1, 6
+            ),
+            0,
+        )
 
     def test_star_not_reachable_before_end_does_not_create_plan(self):
         state = snapshot(stars=frozenset({(3, 3)}), remaining_moves=0)
         self.assertIsNone(planner.build_food_plan(state, 'A', (3, 3), None, 0))
 
-    def test_protected_enclosure_is_not_suicide_but_expiry_removes_protection(self):
-        state = snapshot(snakes={'A': ((0, 0),), 'B': ((8, 12),)},
-                         walls=frozenset({(0, 1), (1, 0)}), invincible_a=2)
+    def test_protected_enclosure_is_not_suicide_but_expiry_removes_protection(
+        self,
+    ):
+        state = snapshot(
+            snakes={'A': ((0, 0),), 'B': ((8, 12),)},
+            walls=frozenset({(0, 1), (1, 0)}),
+            invincible_a=2,
+        )
         self.assertNotEqual(planner.classify_safety(state, 'A')[0], 'SUICIDAL')
-        self.assertEqual(planner.classify_safety(replace(state, invincible_a=0), 'A')[0], 'SUICIDAL')
+        self.assertEqual(
+            planner.classify_safety(replace(state, invincible_a=0), 'A')[0],
+            'SUICIDAL',
+        )
 
     def test_protected_bomb_route_has_no_economic_loss(self):
         state = snapshot(invincible_a=5, bombs_small=frozenset({(3, 4)}),

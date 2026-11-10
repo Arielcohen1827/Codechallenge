@@ -7,7 +7,6 @@ from pathlib import Path
 
 from coverage import Coverage
 
-
 ROOT = Path(__file__).resolve().parent.parent
 
 
@@ -33,9 +32,12 @@ class TestCiPythonCompatibility(unittest.TestCase):
 
 
 class TestCiCoverageGate(unittest.TestCase):
-    def test_shared_configuration_measures_all_own_source_and_enforces_gate(self):
+    def test_shared_configuration_measures_all_own_source_and_enforces_gate(
+        self,
+    ):
         cov = Coverage(config_file=str(ROOT / '.coveragerc'))
         self.assertEqual(cov.get_option('run:source'), ['.'])
+        self.assertTrue(cov.get_option('run:relative_files'))
         self.assertEqual(cov.get_option('report:fail_under'), 90)
         self.assertEqual(cov.get_option('report:precision'), 2)
 

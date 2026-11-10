@@ -1,314 +1,174 @@
-# codechallenge-test-client
+# Bot Snake CodeChallenge
 
-A minimal **bot client** for [The Code Challenge](https://codechallenge.net.ar).
-It connects to the match server over a websocket using your bot's token,
-auto-accepts challenges, and plays. Use it as a starting point (and a smoke
-test) for writing your own bot.
+[![Lint](https://github.com/Arielcohen1827/Codechallenge/actions/workflows/lint.yml/badge.svg?branch=main)](https://github.com/Arielcohen1827/Codechallenge/actions/workflows/lint.yml)
+[![Complexity](https://github.com/Arielcohen1827/Codechallenge/actions/workflows/complexity.yml/badge.svg?branch=main)](https://github.com/Arielcohen1827/Codechallenge/actions/workflows/complexity.yml)
+[![Coverage](https://raw.githubusercontent.com/Arielcohen1827/Codechallenge/python-coverage-comment-action-data/badge.svg)](https://github.com/Arielcohen1827/Codechallenge/tree/python-coverage-comment-action-data)
 
-## How it works
+Bot en Python para el Snake por turnos de Computación II 2026.
+El cliente mantiene partidas independientes y responde al servidor por WebSocket.
+Las fuentes oficiales guardadas están en `docs/reglas/`.
 
-Your bot authenticates with its **token** (from **My Bots** on the web) and
-opens a websocket to the server:
+## Instalación
 
-```
-wss://server.codechallenge.net.ar/ws?token=<YOUR_BOT_TOKEN>   # production
-ws://localhost:5000/ws?token=<YOUR_BOT_TOKEN>                          # local
-```
+Requiere Python 3.10 o posterior y acceso al servidor de CodeChallenge.
 
-The server then sends events and the bot replies with actions (JSON):
-
-| Event          | The bot does…                                                        |
-| -------------- | -------------------------------------------------------------------- |
-| `list_users`   | nothing (just who's online)                                          |
-| `challenge`    | replies `accept_challenge` with the `challenge_id`                   |
-| `your_turn`    | plays a move — replies `move` with the move data + the `turn_token`  |
-| `game_over`    | nothing (the match ended)                                            |
-
-`run.py` uses the competitive Snake strategy in this repository. It supports
-variable 12-20 row/column boards, numbered food, permanent multiplier pickups,
-the shrinking `#` wall, and the 3-5 copies of every numbered food introduced
-in game version 6.
-
-The decision layer also includes a compact pure-Python search engine. It uses
-bitboards, iterative deepening, alpha-beta pruning, and a transposition table to
-look several alternating turns ahead under a strict per-move time budget. Its
-score can refine choices that passed the exact safety checks, but it cannot
-promote a move already classified as suicidal or a forced loss.
-
-## Requirements
-
-- Python 3.10+
-- `websockets` (see `requirements.txt`)
-
-## Repository layout
-
-```text
-run.py                 Websocket client entrypoint
-launch_bot.py          Windows bot selector and viewer launcher
-boot.bat / boot1.bat   Windows startup runners
-install.bat / start.sh Installation and command-line startup
-coverage.bat          Local coverage runner
-snake_bot/            Rules, state, planning, search, version and weights
-tools/                Lab, analysis, benchmark, optimizer and viewer server
-tests/                Behavior tests (python -m unittest discover -v)
-docs/reglas/          Saved game rules and their page resources
-scripts/              Browser challenge helper (auto_challenge_page.js)
-viewer/               Viewer HTML, JavaScript and CSS
-games/                Local match logs and live snapshots (ignored)
-weights/              Local weight configurations and search outputs
-```
-
-Run tool commands from the repository root with `python -m tools.<name>`.
-Imports use `snake_bot.<module>` and `tools.<module>`. The root also keeps
-README, AGENTS, requirements, Git/CI configuration and the local `.env` and
-virtual environment. Logs, viewer resources and weight files retain their
-existing locations. The browser helper is now `scripts/auto_challenge_page.js`.
-
-## Run
-
-```bash
-python -m venv .venv && source .venv/bin/activate
-pip install -r requirements.txt
-python run.py <YOUR_BOT_TOKEN>
-```
-
-Get `<YOUR_BOT_TOKEN>` from **My Bots** in the web app. By default `run.py`
-connects to the production server; switch the `uri` in `run.py` to the
-`localhost` line to play against a local server.
-
-### Windows bot selector
-
-Run `install.bat` once to prepare `venv`, then open `boot.bat` or `boot1.bat`.
-Both runners ask which bot to use and open the local match viewer.
-
-The launcher reads `.env` beside the runners. This file is ignored by Git.
-`.env_example` is a versioned template without tokens. Configure each bot with
-a numbered pair of keys:
-
-```dotenv
-CODECHALLENGE_BOT_1_NAME=arielcohen
-CODECHALLENGE_BOT_1_TOKEN=
-CODECHALLENGE_BOT_2_NAME=Charmander
-CODECHALLENGE_BOT_2_TOKEN=
-```
-
-Fill each token value locally from **My Bots**. To add another bot, use the
-next number. Only bots with a configured token are available for selection.
-Use plain `KEY=value` lines, optionally quote the value, and put comments on
-their own lines starting with `#`. Shell commands and variable interpolation
-are not evaluated.
-
-The selected token is also passed as `CODECHALLENGE_TOKEN` to the bot process.
-When no named bots are configured, an existing `CODECHALLENGE_TOKEN`
-environment variable can be used as a fallback.
-
-`start.sh` remains a command-line runner accepting the token as an argument.
-`start_dev.sh` and `*.local.bat` are ignored local helpers. Never put real
-tokens in `.env_example` or other tracked files.
-
-## Tests
-
-`tests/test_run.py` covers the event handling, the move replies and the game log,
-using a fake websocket — nothing connects to the network.
-
-```bash
-python -m unittest discover -v
-```
-
-They also run on GitHub Actions for every push and pull request
-(`.github/workflows/tests.yml`), on Python 3.10 and 3.12.
-
-Coverage uses the same repository-wide scope locally and in CI, with a 90%
-minimum. Run `coverage.bat` on Windows, or:
-
-```bash
-python -m coverage run -m unittest discover -v
-python -m coverage report --fail-under=90
-```
-
-Both runners use `.coveragerc` to measure all project Python code, including
-`snake_bot/`, `tools/`, `run.py` and `launch_bot.py`. Tests, virtual environments
-and generated Python caches are excluded. The 90% gate applies to source code
-only; missing lines are shown with two decimal places of coverage precision.
-
-## Game logs
-
-When a match ends, the client writes a **`games/game_<game_id>.log`** file with
-everything that happened: each event received (`<`) and action
-sent (`>`), as JSON, ending with the `game_over` event. Useful for replaying or
-debugging a match. The `games/` directory is git-ignored.
-
-Each new log starts with a local metadata line (`=`) containing the bot version
-from `snake_bot/bot_version.py`. Bump `BOT_VERSION` before a new test batch, for example
-`1.0`, `1.1`, `1.2`, so match results can be compared by version.
-
-```
-= {"event": "bot_version", "version": "1.0", "notes": "..."}
-< {"event": "your_turn", "data": {"board": "...", "game_id": "g_9f", "turn_token": "t_01", ...}}
-? {"event": "decision_debug", "direction": "right", "reason": "food_plan", ...}
-> {"action": "move", "data": {"game_id": "g_9f", "turn_token": "t_01", "col": 3}}
-...
-< {"event": "game_over", "data": {"board": "...", "game_id": "g_9f", ...}}
-```
-
-The `?` lines are local-only decision diagnostics. They include legal moves, the
-chosen food plan, candidate move penalties, rival pressure, and why the move was
-selected. They are not sent to the server.
-
-Analyze saved match results from the repository root:
-
-```bash
-python -m tools.analyze_matches "games/game_*.log"
-```
-
-## Live match viewer
-
-While `run.py` is playing, it writes the latest state of every match to
-`games/live/`. Start the local viewer in another terminal:
-
-```bash
-python -m tools.match_viewer
-```
-
-Then open `http://127.0.0.1:8765`. The page refreshes every 750 ms and shows all
-active/recent matches, scores, multipliers, the current target digit, and the
-bot's latest decision. The viewer is local and never receives the bot token.
-
-## Offline bot lab
-
-`tools/bot_lab.py` runs repeatable local checks for the Snake bot without connecting
-to the Code Challenge server.
-
-Run seeded v6 self-play simulations. Board dimensions are randomized
-between 12 and 20 for every seed unless `--rows` and `--cols` are supplied:
-
-```bash
-python -m tools.bot_lab simulate --games 10 --seed 1 --turns 120
-```
-
-Reevaluate real match positions using the current bot version:
-
-```bash
-python -m tools.bot_lab logs game_*.log
-```
-
-For a faster sampled pass:
-
-```bash
-python -m tools.bot_lab logs game_*.log --max-positions 300
-```
-
-Useful metrics:
-
-- `food_per_100_turns`: how often the bot eats the correct numbered food.
-- `avg_score_A` / `avg_score_B`: real game score, using `+1` for an ordinary
-  move; special cells replace that point with their exact reward or penalty
-  (`digit * 100 * multiplier`, `+50`, or `-500`).
-- `pickups_A` / `pickups_B`: multiplier pickups collected.
-- `wrong_digits_A` / `wrong_digits_B`: penalized digits eaten.
-- `wall_hits_A` / `wall_hits_B`: penalized attempts to move into `#`.
-- `edge_moves_per_100_turns`: how often it goes to border/corner positions.
-- `avg_center_score`: whether it is tending toward center control.
-- `safety_SAFE` / `safety_ACCEPTABLE_RISK`: immediate safety classification of
-  the current version's decisions on logged positions.
-
-## Paired weight benchmark
-
-`tools/benchmark_bot.py` compares two explicit weight files using the current
-simulator and the same bot code. Each seed runs twice: candidate as A, then
-candidate as B. A always starts. Repetitions reuse the same seed list; timed
-search can still produce different decisions on repeated runs.
+En PowerShell, desde la raíz del repositorio, ejecutar
 
 ```powershell
-venv\Scripts\python.exe -m tools.benchmark_bot --reference weights\active_weights.json --candidate weights\best_weights.json --seeds 2 --seed 1000 --repetitions 1 --turns 30 --output games\benchmarks\comparison.json
+py -m venv venv
+.\venv\Scripts\Activate.ps1
+python -m pip install -r requirements.txt -r requirements-quality.txt
 ```
 
-Both weight files are required. Missing weight keys use the current defaults,
-and the report records the full effective configurations and their hashes.
-The benchmark never saves or activates weights. Optional `--rows`, `--cols`
-and `--food` control the simulator; dimensions default to random 12-20 boards.
+En Linux o macOS, ejecutar
 
-The JSON contains `manifest`, `summary` and `games`: execution provenance,
-aggregates including candidate-side and paired results, and individual games
-with events attributed to candidate/reference. Duration means alternating
-simulation turns, not elapsed seconds. Win rates are fractions from 0 to 1;
-the rate excluding draws is null when every game is a draw.
-
-This first version does not record search diagnostics, total decision time or
-avoidable crashes. Results describe the existing local simulator, including
-its repair of illegal moves, rather than a certified copy of the server.
-Reports under `games/` are ignored by Git.
-
-## Weight Optimizer
-
-`tools/optimize_weights.py` runs a reproducible random search over the bot's scoring
-weights. It refines `weights/active_weights.json` when that file exists (or the
-defaults otherwise). Each candidate plays against that baseline and alternates
-sides, so the optimizer can compare real game score and score difference.
-
-Quick search:
-
-```bash
-python -m tools.optimize_weights --trials 12 --games 3 --turns 80
+```sh
+python3 -m venv .venv
+. .venv/bin/activate
+python -m pip install -r requirements.txt -r requirements-quality.txt
 ```
 
-Use saved real games as extra pressure:
+`requirements.txt` declara el cliente WebSocket y coverage.
+`requirements-quality.txt` declara Flake8, Xenon y Radon.
 
-```bash
-python -m tools.optimize_weights --trials 20 --games 4 --turns 100 --logs game_*.log
+## Ejecución
+
+El token personal se obtiene en My Bots de la plataforma. El cliente acepta el token
+como argumento y se conecta a `wss://server.codechallenge.net.ar/ws`.
+
+```powershell
+python run.py <TOKEN_PERSONAL>
 ```
 
-By default the optimizer samples up to 300 real log positions per candidate. Use
-`--max-log-positions 0` to evaluate every logged position.
+El lanzador de Windows también permite seleccionar un bot y abrir el visor local.
+Copiar `.env_example` a `.env` y completar localmente los pares
+`CODECHALLENGE_BOT_1_NAME` y `CODECHALLENGE_BOT_1_TOKEN`.
+Para otro bot se cambia el número. Abrir `boot.bat` o `boot1.bat` después de
+preparar el entorno con `install.bat`.
 
-Save and activate the best weights locally:
+Los tokens deben permanecer en el entorno local. `.env`, los logs, los entornos
+virtuales y los pesos activos están ignorados por Git.
 
-```bash
-python -m tools.optimize_weights --trials 20 --games 4 --turns 100 --logs game_*.log --activate
+## Reglas acumulativas y cubo 3D
+
+El protocolo vigente v11 usa un cubo de 20 × 20 × 20.
+Cada celda conserva las coordenadas `(level, row, col)`.
+`up/down/left/right` cambian fila o columna, y `ascend/descend` cambian el nivel.
+El nivel cero es el superior. Los disparos admiten las seis direcciones.
+
+Las mecánicas acumulativas incluyen números en orden cíclico y sus copias,
+multiplicadores X, paredes, choques y comida de cola, bombas de proximidad,
+disparos y comida de disparo, estrellas e invencibilidad. En v11 cada dígito
+tiene entre 10 y 15 copias, hay seis X, seis bombas grandes, quince pequeñas
+y treinta estrellas durante el frenesí. Las paredes son placas cuadradas
+que pierden su anillo exterior cada ronda. La estrella normal debe estar a
+igual distancia Manhattan 3D de ambas cabezas y ser visible para ambas.
+
+El servidor envía únicamente los tres planos que pasan por la cabeza propia.
+`board_x` fija la columna y se indexa por nivel y fila.
+`board_y` fija la fila y se indexa por nivel y columna.
+`board_z` fija el nivel y se indexa por fila y columna.
+`board` combina esos planos en orden x, y, z separados por una línea vacía.
+
+`CubeObservation` deduplica las intersecciones e incluye espacios vacíos
+observados. `KnowledgeState` conserva recuerdos con su turno de observación.
+Volver a ver una celda vacía elimina el recuerdo anterior. Un objeto fuera
+de los planos queda como información posiblemente desactualizada. Un rival
+oculto tiene posición actual desconocida. La búsqueda y las verificaciones
+de acciones conservan esa incertidumbre.
+
+## Arquitectura
+
+| Componente | Responsabilidad |
+|---|---|
+| `run.py` | WebSocket, eventos, envío de acciones y logs redactados |
+| `snake_brain.py` | Coordinación y memoria independiente por partida |
+| `geometry.py` | Coordenadas, vecinos y distancias compartidas |
+| `observation.py` | Tres planos y conocimiento parcial |
+| `snake_state.py` y `game_rules.py` | Estado y transiciones de las reglas |
+| `food_planner.py` | Rutas, economía de objetivos y horizonte X |
+| `move_search.py` y `search_engine.py` | Seguridad, búsqueda acotada y representación compacta |
+| `v7_logging.py` | Predicciones, reconciliación y diagnóstico |
+| `tools/bot_lab.py` | Simulación con estado verdadero y observaciones proyectadas |
+| `viewer/` y `tools/match_viewer.py` | Visualización local de partidas y planos |
+
+La simulación puede conocer el cubo completo. El bot recibe las observaciones
+parciales. Las transiciones se concentran en el mismo motor de reglas.
+Con observación parcial, la búsqueda táctica evalúa sucesores observados de
+un movimiento y marca las respuestas rivales como inciertas. La búsqueda
+adversarial profunda sigue disponible para estados completos.
+
+## Tests y controles de calidad
+
+Desde la raíz y con el entorno activado, ejecutar
+
+```sh
+python -m unittest discover
+coverage erase
+coverage run -m unittest discover
+coverage report -m
+coverage report --fail-under=90
+flake8 .
 ```
 
-Refine only the score-lead control strategy without disturbing the other
-learned weights:
+`.coveragerc` mide todo el código propio, incluye las herramientas, excluye tests
+y dependencias y establece `relative_files = true`.
+El mínimo exigido es 90 %. Flake8 lee `setup.cfg` y utiliza un solo proceso
+para mantener acotado el consumo de recursos.
 
-```bash
-python -m tools.optimize_weights --tune-advantage-only --trials 20 --games 4 --turns 150
+Para medir todo el código Python versionado de la solución, excluyendo los
+tests, ejecutar en PowerShell
+
+```powershell
+$sources = git ls-files '*.py' | Where-Object { $_ -notlike 'tests/*' }
+xenon --max-absolute A --max-modules A --max-average A $sources
+git diff --check
 ```
 
-The bot automatically loads `weights/active_weights.json` when present. Delete
-that file to return to the default weights in `snake_bot/bot_weights.py`.
+En Bash, el comando equivalente es
 
-In optimizer output:
-
-- `score` is the optimizer's combined training score.
-- `game_score` is the candidate's real average game score.
-- `diff` is candidate score minus opponent score.
-- `w` is candidate wins over candidate games.
-- `objective_improvement` is the optimizer score gained over the loaded
-  baseline; validated mode requires a positive minimum before activation.
-
-By default, each seed is played twice:
-
-- candidate as A vs default as B
-- default as A vs candidate as B
-
-That mirror test makes the comparison less dependent on starting side. Use
-`--no-mirror-seeds` only for quick rough experiments.
-
-Validated search mode keeps running batches until it finds a candidate that
-beats the thresholds, and only activates weights when the candidate passes:
-
-```bash
-python -m tools.optimize_weights --until-improvement --trials 30 --max-batches 6 --games 6 --turns 150 --logs game_*.log --max-log-positions 300 --min-diff 80 --max-edge100 50 --activate
+```sh
+mapfile -d '' sources < <(git ls-files -z -- '*.py' ':(exclude)tests/**')
+xenon --max-absolute A --max-modules A --max-average A "${sources[@]}"
 ```
 
-If no candidate passes, it still writes `weights/best_weights.json`, but does
-not write `weights/active_weights.json`.
+Los tres límites A se aplican a cada bloque, al promedio por archivo y al
+promedio del proyecto. Esta selección incluye todas las herramientas propias.
 
-## Write your own bot
+## CI y publicación de cobertura
 
-You don't need this client — any websocket client works. The contract is:
+Los workflows de lint, tests y complejidad se ejecutan en pushes a main y en
+pull requests. Las pruebas cubren Python 3.10 y 3.12.
+Cada control devuelve un fallo si no cumple su umbral.
 
-1. Connect to `ws(s)://<server>/ws?token=<your bot token>`.
-2. On `challenge`, send `{"action": "accept_challenge", "data": {"challenge_id": "..."}}`.
-3. On `your_turn`, read `data` (board / game state, `game_id`, `turn_token`) and
-   send your move: `{"action": "move", "data": { ... , "turn_token": "..." }}`.
+El job de Python 3.12 publica los datos de cobertura en main y comenta los
+pull requests mediante `python-coverage-comment-action`.
+Tiene permisos `contents: write` y `pull-requests: write`.
+El badge de cobertura se genera en la rama de datos de la acción.
+Los pull requests externos publican el comentario mediante un artefacto y un
+workflow posterior que consume ese comentario.
+Los badges muestran el estado remoto publicado, que puede diferir del trabajo local.
+
+## Logs, visor y laboratorio
+
+Los logs y snapshots locales se escriben bajo `games/`.
+Conservan la observación, la acción y diagnósticos de incertidumbre.
+Los datos de autenticación se redactan antes de escribirlos.
+
+```sh
+python -m tools.match_viewer
+python -m tools.bot_lab --help
+python -m tools.bot_lab simulate --help
+python -m tools.analyze_matches games/game_ejemplo.log
+```
+
+El visor permite inspeccionar los planos de una observación 3D.
+Los comandos históricos de comparación y optimización siguen disponibles
+bajo `tools/`. Los pesos activos se cargan desde el archivo local
+`weights/active_weights.json`, cuando existe.
+
+## Preparación para la defensa
+
+`docs/GUIA_DEFENSA.md` explica el recorrido de una decisión y los controles.
+La participación en torneos, la asignación del repositorio y la comprensión
+del código se comprueban con evidencia externa y con la evaluación presencial.

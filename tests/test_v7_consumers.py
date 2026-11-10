@@ -3,8 +3,12 @@ from dataclasses import replace
 from time import perf_counter
 
 from snake_bot.food_planner import (
-    winning_suicide_move, forced_kill_move, objective_kind, objective_reward,
-    build_food_plans, apply_move as simulated_move,
+    winning_suicide_move,
+    forced_kill_move,
+    objective_kind,
+    objective_reward,
+    build_food_plans,
+    apply_move as simulated_move,
 )
 from snake_bot.move_search import TurnSearchCache, terminal_trap_value
 from snake_bot.search_engine import IterativeSearchEngine
@@ -127,19 +131,32 @@ class TestV7Consumers(unittest.TestCase):
         self.assertTrue(after.is_terminal())
 
     def test_planner_rival_elimination_is_a_win_not_zero_escape_loss(self):
-        from snake_bot.food_planner import rival_response_stats, survival_move_analysis
+        from snake_bot.food_planner import (
+            rival_response_stats,
+            survival_move_analysis,
+        )
         from snake_bot.bot_weights import get_weights
+
         for score in (-2000, -2001):
             with self.subTest(score=score):
-                state = open_state(rows=3, cols=3, food=frozenset(),
-                                   snakes={'A': ((1, 1), (0, 1), (1, 0)), 'B': ((0, 0),)},
-                                   scores={'A': 0, 'B': score}, crashed_a=False, crashed_b=False)
+                state = open_state(
+                    rows=3,
+                    cols=3,
+                    food=frozenset(),
+                    snakes={'A': ((1, 1), (0, 1), (1, 0)), 'B': ((0, 0),)},
+                    scores={'A': 0, 'B': score},
+                    crashed_a=False,
+                    crashed_b=False,
+                )
                 stats = rival_response_stats(state, 'A', 'left')
                 self.assertFalse(stats['forced_zero'])
                 self.assertEqual(stats['zero_escape_replies'], 0)
                 analysis = survival_move_analysis(state, 'A', 'left')
                 if score == -2001:
-                    self.assertEqual(analysis['future_score'], get_weights()['enemy_trapped_future_bonus'])
+                    self.assertEqual(
+                        analysis['future_score'],
+                        get_weights()['enemy_trapped_future_bonus'],
+                    )
                     self.assertEqual(analysis['reply_count'], 0)
                 else:
                     self.assertGreater(analysis['reply_count'], 0)
@@ -147,17 +164,33 @@ class TestV7Consumers(unittest.TestCase):
     def test_third_and_fourth_ply_use_official_terminal_values(self):
         from snake_bot.move_search import best_reply_score, extra_depth_score
         from snake_bot.bot_weights import get_weights
+
         weights = get_weights()
         for remaining in (3, 4):
-            for scores, result in (({'A': 200, 'B': 0}, weights['deep_enemy_trapped_bonus']),
-                                   ({'A': 0, 'B': 200}, -weights['deep_no_reply_penalty']),
-                                   ({'A': -1 if remaining == 3 else 0, 'B': 0}, 0)):
+            for scores, result in (
+                ({'A': 200, 'B': 0}, weights['deep_enemy_trapped_bonus']),
+                ({'A': 0, 'B': 200}, -weights['deep_no_reply_penalty']),
+                ({'A': -1 if remaining == 3 else 0, 'B': 0}, 0),
+            ):
                 with self.subTest(scores=scores, remaining=remaining):
-                    state = open_state(food=frozenset(), scores=scores, remaining_moves=remaining)
-                    self.assertEqual(extra_depth_score(state, 'A', 'up', TurnSearchCache()), result)
-        for scores, result in (({'A': 200, 'B': 0}, weights['deep_enemy_trapped_bonus']),
-                               ({'A': 0, 'B': 200}, -weights['deep_no_reply_penalty']),
-                               ({'A': -1, 'B': 0}, 0)):
+                    state = open_state(
+                        food=frozenset(),
+                        scores=scores,
+                        remaining_moves=remaining,
+                    )
+                    self.assertEqual(
+                        extra_depth_score(state, 'A', 'up', TurnSearchCache()),
+                        result,
+                    )
+        for scores, result in (
+            ({'A': 200, 'B': 0}, weights['deep_enemy_trapped_bonus']),
+            ({'A': 0, 'B': 200}, -weights['deep_no_reply_penalty']),
+            ({'A': -1, 'B': 0}, 0),
+        ):
             with self.subTest(last_reply=scores):
-                state = open_state(food=frozenset(), scores=scores, remaining_moves=1)
-                self.assertEqual(best_reply_score(state, 'A', TurnSearchCache()), result)
+                state = open_state(
+                    food=frozenset(), scores=scores, remaining_moves=1
+                )
+                self.assertEqual(
+                    best_reply_score(state, 'A', TurnSearchCache()), result
+                )

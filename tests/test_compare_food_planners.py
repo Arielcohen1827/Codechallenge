@@ -1,11 +1,11 @@
 """Contracts for planner-only isolation and bounded counterfactual movements."""
+
 import copy
 import hashlib
 import io
 import json
 from pathlib import Path
 import random
-import sys
 import tempfile
 import unittest
 from unittest.mock import patch
@@ -14,7 +14,6 @@ from snake_bot import bot_weights, food_planner, move_search, snake_brain
 from snake_bot.search_engine import SearchResult
 from tools import bot_lab
 from tools import compare_food_planners as compare
-
 
 ROOT = Path(__file__).resolve().parents[1]
 
@@ -28,7 +27,10 @@ class IsolationTests(unittest.TestCase):
     def test_exact_hash_is_checked_before_execution(self):
         with self.assertRaisesRegex(ValueError, 'SHA256'):
             compare.load_planner(self.path, '0' * 64, self.weights)
-        self.assertEqual(compare.sha256(self.path), hashlib.sha256(self.path.read_bytes()).hexdigest())
+        self.assertEqual(
+            compare.sha256(self.path),
+            hashlib.sha256(self.path.read_bytes()).hexdigest(),
+        )
 
     def test_private_bindings_reach_brain_cache_and_search_without_global_swap(self):
         before = dict(bot_weights.get_weights())
@@ -71,8 +73,13 @@ class IsolationTests(unittest.TestCase):
 
     def test_weights_are_private_and_immutable(self):
         changed = dict(self.weights, food_distance_cost=999)
-        other = compare.load_planner(self.path, compare.sha256(self.path), changed)
-        self.assertNotEqual(other.get_weights()['food_distance_cost'], self.planner.get_weights()['food_distance_cost'])
+        other = compare.load_planner(
+            self.path, compare.sha256(self.path), changed
+        )
+        self.assertNotEqual(
+            other.get_weights()['food_distance_cost'],
+            self.planner.get_weights()['food_distance_cost'],
+        )
         with self.assertRaises(TypeError):
             other.get_weights()['food_distance_cost'] = 1
 
@@ -128,95 +135,217 @@ class RunnerTests(unittest.TestCase):
     def test_equal_full_plans_skip_shadow_and_reuse_v7_loop(self):
         rows = []
         rng_before = random.getstate()
-        with patch.object(compare, 'make_brain', wraps=compare.make_brain) as factory, \
-                patch.object(compare.IterativeSearchEngine, 'search', return_value=SearchResult(
-                    {}, 0, 0, 0, 45)):
-            result = compare.compare_game(901, 'A', self.planner, self.planner,
-                                          self.weights, rows.append, max_turns=2)
+        with (
+            patch.object(
+                compare, 'make_brain', wraps=compare.make_brain
+            ) as factory,
+            patch.object(
+                compare.IterativeSearchEngine,
+                'search',
+                return_value=SearchResult({}, 0, 0, 0, 45),
+            ),
+        ):
+            result = compare.compare_game(
+                901,
+                'A',
+                self.planner,
+                self.planner,
+                self.weights,
+                rows.append,
+                max_turns=2,
+            )
         self.assertEqual(factory.call_count, 2)
         self.assertEqual(result['match']['turns'], 2)
         self.assertEqual(result['counts']['direction_changed'], 0)
         self.assertEqual(len(rows), 2)
-        self.assertTrue(all(row['shadow_mode'] == 'equal_full_plan_no_search' for row in rows))
+        self.assertTrue(
+            all(
+                row['shadow_mode'] == 'equal_full_plan_no_search'
+                for row in rows
+            )
+        )
         self.assertEqual([row['actor'] for row in rows], ['A', 'B'])
         self.assertEqual(random.getstate(), rng_before)
-        self.assertTrue(all(row['history']['crash_history'] == {'A': False, 'B': False} for row in rows))
+        self.assertTrue(
+            all(
+                row['history']['crash_history'] == {'A': False, 'B': False}
+                for row in rows
+            )
+        )
 
-    def test_changed_plan_uses_independent_search_and_keeps_actual_history(self):
-        other = compare.load_planner(ROOT / 'snake_bot/food_planner.py',
-                                     compare.sha256(ROOT / 'snake_bot/food_planner.py'), self.weights)
+    def test_changed_plan_uses_independent_search_and_keeps_actual_history(
+        self,
+    ):
+        other = compare.load_planner(
+            ROOT / 'snake_bot/food_planner.py',
+            compare.sha256(ROOT / 'snake_bot/food_planner.py'),
+            self.weights,
+        )
         choose = other.choose_food_plan
 
         def altered(*args, **kwargs):
             from dataclasses import replace
-            selected = choose(*args, **kwargs) or next(iter(kwargs['plans']), None)
-            return replace(selected, value=selected.value + 1) if selected else None
+
+            selected = choose(*args, **kwargs) or next(
+                iter(kwargs['plans']), None
+            )
+            return (
+                replace(selected, value=selected.value + 1)
+                if selected
+                else None
+            )
 
         other.choose_food_plan = altered
         rows = []
         before = dict(bot_weights.get_weights())
-        with patch.object(compare.IterativeSearchEngine, 'search', return_value=SearchResult(
-                    {}, 0, 0, 0, 45)) as search, \
-                patch.object(bot_lab, 'initial_state', return_value=bot_lab.initial_state(901)):
-            result = compare.compare_game(901, 'B', self.planner, other,
-                                          self.weights, rows.append, max_turns=2)
+        with (
+            patch.object(
+                compare.IterativeSearchEngine,
+                'search',
+                return_value=SearchResult({}, 0, 0, 0, 45),
+            ) as search,
+            patch.object(
+                bot_lab,
+                'initial_state',
+                return_value=bot_lab.initial_state(901),
+            ),
+        ):
+            result = compare.compare_game(
+                901,
+                'B',
+                self.planner,
+                other,
+                self.weights,
+                rows.append,
+                max_turns=2,
+            )
         self.assertEqual(search.call_count, 4)
-        self.assertTrue(all(row['shadow_mode'] == 'independent_timed_estimate' for row in rows))
-        self.assertTrue(all(row['classification']['any_plan_changed'] for row in rows))
+        self.assertTrue(
+            all(
+                row['shadow_mode'] == 'independent_timed_estimate'
+                for row in rows
+            )
+        )
+        self.assertTrue(
+            all(row['classification']['any_plan_changed'] for row in rows)
+        )
         self.assertEqual(result['match']['candidate_side'], 'B')
         self.assertEqual(bot_weights.get_weights(), before)
-        self.assertEqual([row['actual_revision'] for row in rows], ['reference', 'candidate'])
+        self.assertEqual(
+            [row['actual_revision'] for row in rows],
+            ['reference', 'candidate'],
+        )
         self.assertTrue(all(row['shadow_history_reconciled'] for row in rows))
 
-    def test_atomic_output_refuses_overwrite_and_failure_retains_completed_checkpoint(self):
+    def test_atomic_output_refuses_overwrite_and_failure_retains_completed_checkpoint(
+        self,
+    ):
         with tempfile.TemporaryDirectory() as directory:
             output = Path(directory) / 'run'
             config = {'seeds': [1], 'turns': 400}
+
             def game(seed, side, *args, **kwargs):
                 if side == 'B':
                     raise RuntimeError('smoke error')
-                return {'match': {'seed': seed, 'candidate_side': side, 'score_a': 8,
-                                  'score_b': 3, 'winner': 'A', 'turns': 2},
-                        'counts': {}, 'timing': {}, 'first_divergence': None}
-            with patch.object(compare, 'compare_game', side_effect=game), \
-                    self.assertRaisesRegex(RuntimeError, 'smoke error'):
-                compare.run_comparison(config, self.planner, self.planner, self.weights, output)
-            self.assertTrue((output / 'seed_1_candidate_A.json').exists())
-            self.assertEqual(json.loads((output / 'summary.json').read_text())['completed_games'], 1)
-            self.assertEqual(json.loads((output / 'error.json').read_text())['seed'], 1)
-            with self.assertRaises(FileExistsError):
-                compare.run_comparison(config, self.planner, self.planner, self.weights, output)
+                return {
+                    'match': {
+                        'seed': seed,
+                        'candidate_side': side,
+                        'score_a': 8,
+                        'score_b': 3,
+                        'winner': 'A',
+                        'turns': 2,
+                    },
+                    'counts': {},
+                    'timing': {},
+                    'first_divergence': None,
+                }
 
-    def test_summary_uses_mirror_pairs_and_predeclared_exposure_threshold(self):
+            with (
+                patch.object(compare, 'compare_game', side_effect=game),
+                self.assertRaisesRegex(RuntimeError, 'smoke error'),
+            ):
+                compare.run_comparison(
+                    config, self.planner, self.planner, self.weights, output
+                )
+            self.assertTrue((output / 'seed_1_candidate_A.json').exists())
+            self.assertEqual(
+                json.loads((output / 'summary.json').read_text())[
+                    'completed_games'
+                ],
+                1,
+            )
+            self.assertEqual(
+                json.loads((output / 'error.json').read_text())['seed'], 1
+            )
+            with self.assertRaises(FileExistsError):
+                compare.run_comparison(
+                    config, self.planner, self.planner, self.weights, output
+                )
+
+    def test_summary_uses_mirror_pairs_and_predeclared_exposure_threshold(
+        self,
+    ):
         def game(seed, side, score, horizon):
-            return {'match': {'seed': seed, 'candidate_side': side,
-                             'score_a': score if side == 'A' else 0,
-                             'score_b': score if side == 'B' else 0,
-                             'winner': side if score > 0 else None, 'turns': 400},
-                    'counts': {'horizon_x_direction_changed': horizon}, 'timing': {}}
-        games = [game(seed, side, 10 if side == 'A' else 20, 1)
-                 for seed in range(3) for side in ('A', 'B')]
+            return {
+                'match': {
+                    'seed': seed,
+                    'candidate_side': side,
+                    'score_a': score if side == 'A' else 0,
+                    'score_b': score if side == 'B' else 0,
+                    'winner': side if score > 0 else None,
+                    'turns': 400,
+                },
+                'counts': {'horizon_x_direction_changed': horizon},
+                'timing': {},
+            }
+
+        games = [
+            game(seed, side, 10 if side == 'A' else 20, 1)
+            for seed in range(3)
+            for side in ('A', 'B')
+        ]
         summary = compare.summarize(games, expected_games=24)
-        self.assertEqual(summary['candidate_by_side']['A']['mean_score_diff'], 10)
-        self.assertEqual(summary['candidate_by_side']['B']['mean_score_diff'], 20)
-        self.assertEqual(summary['mirror_pairs'][0]['mean_candidate_score_diff'], 15)
+        self.assertEqual(
+            summary['candidate_by_side']['A']['mean_score_diff'], 10
+        )
+        self.assertEqual(
+            summary['candidate_by_side']['B']['mean_score_diff'], 20
+        )
+        self.assertEqual(
+            summary['mirror_pairs'][0]['mean_candidate_score_diff'], 15
+        )
         self.assertEqual(summary['candidate']['median_score_diff'], 15)
         self.assertEqual(summary['candidate']['win_rate'], 1)
         self.assertEqual(summary['candidate']['win_rate_excluding_draws'], 1)
         self.assertEqual(summary['mirror_pairs'][0]['wins'], 2)
         self.assertTrue(summary['exposure']['threshold_met'])
         self.assertEqual(summary['conclusion'], 'INCONCLUSO')
-        self.assertFalse(compare.summarize(games[:4], 24)['exposure']['threshold_met'])
+        self.assertFalse(
+            compare.summarize(games[:4], 24)['exposure']['threshold_met']
+        )
 
     def test_shared_weights_restored_even_after_simulator_failure(self):
         original = dict(bot_weights.get_weights())
         changed = dict(self.weights, food_distance_cost=987)
+
         def fail(*args, **kwargs):
             self.assertEqual(bot_weights.get_weights(), changed)
             raise RuntimeError('simulation failed')
-        with patch.object(bot_lab, 'initial_state', side_effect=fail), \
-                self.assertRaisesRegex(RuntimeError, 'simulation failed'):
-            compare.compare_game(901, 'A', self.planner, self.planner, changed, lambda row: None, 2)
+
+        with (
+            patch.object(bot_lab, 'initial_state', side_effect=fail),
+            self.assertRaisesRegex(RuntimeError, 'simulation failed'),
+        ):
+            compare.compare_game(
+                901,
+                'A',
+                self.planner,
+                self.planner,
+                changed,
+                lambda row: None,
+                2,
+            )
         self.assertEqual(bot_weights.get_weights(), original)
 
     def test_input_hashes_are_checked_after_play_and_before_results_are_trusted(self):
@@ -231,32 +360,75 @@ class RunnerTests(unittest.TestCase):
 
     def test_actual_plan_gate_fails_if_preflight_uses_different_input(self):
         select = compare.selected_plan
+
         def wrong(*args, **kwargs):
             from dataclasses import replace
+
             plan, probe = select(*args, **kwargs)
             return replace(plan, value=plan.value + 1) if plan else None, probe
-        with patch.object(bot_lab, 'initial_state', return_value=bot_lab.initial_state(901)), \
-                patch.object(compare, 'selected_plan', side_effect=wrong), \
-                patch.object(compare.IterativeSearchEngine, 'search', return_value=SearchResult({}, 0, 0, 0, 45)), \
-                self.assertRaisesRegex(ValueError, 'actual debug plan'):
-            compare.compare_game(901, 'A', self.planner, self.planner, self.weights, lambda row: None, 2)
+
+        with (
+            patch.object(
+                bot_lab,
+                'initial_state',
+                return_value=bot_lab.initial_state(901),
+            ),
+            patch.object(compare, 'selected_plan', side_effect=wrong),
+            patch.object(
+                compare.IterativeSearchEngine,
+                'search',
+                return_value=SearchResult({}, 0, 0, 0, 45),
+            ),
+            self.assertRaisesRegex(ValueError, 'actual debug plan'),
+        ):
+            compare.compare_game(
+                901,
+                'A',
+                self.planner,
+                self.planner,
+                self.weights,
+                lambda row: None,
+                2,
+            )
 
     def test_completed_run_saves_progress_and_checks_hashes(self):
         with tempfile.TemporaryDirectory() as directory:
             output = Path(directory) / 'run'
             row = {'turn': 49, 'snapshot': {'remaining_moves': 351}}
+
             def game(seed, side, reference, candidate, weights, emit, turns):
                 emit(row)
-                return {'match': {'seed': seed, 'candidate_side': side, 'score_a': 0,
-                                  'score_b': 0, 'winner': None, 'turns': 0}, 'counts': {}, 'timing': {}}
-            with patch.object(compare, 'compare_game', side_effect=game), \
-                    patch('sys.stdout', new_callable=io.StringIO) as output_text:
-                result = compare.run_comparison({'seeds': [1], 'turns': 400}, self.planner,
-                                                self.planner, self.weights, output)
+                return {
+                    'match': {
+                        'seed': seed,
+                        'candidate_side': side,
+                        'score_a': 0,
+                        'score_b': 0,
+                        'winner': None,
+                        'turns': 0,
+                    },
+                    'counts': {},
+                    'timing': {},
+                }
+
+            with (
+                patch.object(compare, 'compare_game', side_effect=game),
+                patch('sys.stdout', new_callable=io.StringIO) as output_text,
+            ):
+                result = compare.run_comparison(
+                    {'seeds': [1], 'turns': 400},
+                    self.planner,
+                    self.planner,
+                    self.weights,
+                    output,
+                )
             self.assertEqual(result['completed_games'], 2)
             self.assertIn('turn=50', output_text.getvalue())
             self.assertTrue((output / 'post_run_hashes.json').exists())
-            self.assertEqual(json.loads((output / 'seed_1_candidate_A.jsonl').read_text()), row)
+            self.assertEqual(
+                json.loads((output / 'seed_1_candidate_A.jsonl').read_text()),
+                row,
+            )
 
     def test_seed_list_rejects_duplicates_and_wrong_count(self):
         self.assertEqual(compare.validate_seeds(list(range(12))), list(range(12)))
@@ -282,71 +454,171 @@ class ProofTests(unittest.TestCase):
             root = Path(directory)
             weights = root / 'weights.json'
             weights.write_text('{}')
-            args = ['--reference', str(ROOT / 'snake_bot/food_planner.py'),
-                    '--candidate', str(ROOT / 'snake_bot/food_planner.py'),
-                    '--weights', str(weights), '--seed-list', str(weights),
-                    '--frozen-cases', str(weights), '--output', str(root / 'out'), '--mode', 'proof']
-            with self.assertRaisesRegex(ValueError, 'SHA256'), \
-                    patch.object(compare, 'compare_game') as game:
+            args = [
+                '--reference',
+                str(ROOT / 'snake_bot/food_planner.py'),
+                '--candidate',
+                str(ROOT / 'snake_bot/food_planner.py'),
+                '--weights',
+                str(weights),
+                '--seed-list',
+                str(weights),
+                '--frozen-cases',
+                str(weights),
+                '--output',
+                str(root / 'out'),
+                '--mode',
+                'proof',
+            ]
+            with (
+                self.assertRaisesRegex(ValueError, 'SHA256'),
+                patch.object(compare, 'compare_game') as game,
+            ):
                 compare.main(args)
             game.assert_not_called()
             self.assertFalse((root / 'out').exists())
 
     def test_proof_uses_recorded_inputs_and_never_brain_search(self):
         from dataclasses import replace
+
         state = bot_lab.initial_state(901, rows=12, cols=12, max_turns=18)
         data = bot_lab.make_turn_data(state, '5580bbd6', 0)
-        planner = compare.load_planner(ROOT / 'snake_bot/food_planner.py',
-                                       compare.sha256(ROOT / 'snake_bot/food_planner.py'), bot_weights.DEFAULT_WEIGHTS)
-        old = planner.FoodPlan((7, 15), ((7, 2), (8, 2)), 13, None, 1, 100, 3, True, None,
-                               'SAFE', 100, objective_kind='multiplier')
+        planner = compare.load_planner(
+            ROOT / 'snake_bot/food_planner.py',
+            compare.sha256(ROOT / 'snake_bot/food_planner.py'),
+            bot_weights.DEFAULT_WEIGHTS,
+        )
+        old = planner.FoodPlan(
+            (7, 15),
+            ((7, 2), (8, 2)),
+            13,
+            None,
+            1,
+            100,
+            3,
+            True,
+            None,
+            'SAFE',
+            100,
+            objective_kind='multiplier',
+        )
         new = replace(old, food=(9, 4), objective_kind='sequence_setup')
-        diagnostic = {'crash_history': {'A': False, 'B': False}, 'current_target': [7, 15],
-                      'hunger': 7, 'repeat_count': 0, 'direction': 'down', 'plan': compare.describe(old),
-                      'verification': {'after': {'tracked_body': {
-                          side: {'body': state.snakes[side], 'order_reliable': True} for side in ('A', 'B')}}}}
-        case = {'filename': 'game_5580bbd6.log', 'special': True, 'debug_line': 576,
-                'observed': data, 'diagnostic': diagnostic, 'observed_history': [{'observed': data}]}
-        with patch.object(planner, 'build_food_plans', return_value=[old]), \
-                patch.object(planner, 'choose_food_plan', side_effect=[old, new]) as select, \
-                patch.object(compare.IterativeSearchEngine, 'search') as search:
-            proof = compare.prove_snapshot([case], planner, planner, bot_weights.DEFAULT_WEIGHTS)
+        diagnostic = {
+            'crash_history': {'A': False, 'B': False},
+            'current_target': [7, 15],
+            'hunger': 7,
+            'repeat_count': 0,
+            'direction': 'down',
+            'plan': compare.describe(old),
+            'verification': {
+                'after': {
+                    'tracked_body': {
+                        side: {
+                            'body': state.snakes[side],
+                            'order_reliable': True,
+                        }
+                        for side in ('A', 'B')
+                    }
+                }
+            },
+        }
+        case = {
+            'filename': 'game_5580bbd6.log',
+            'special': True,
+            'debug_line': 576,
+            'observed': data,
+            'diagnostic': diagnostic,
+            'observed_history': [{'observed': data}],
+        }
+        with (
+            patch.object(planner, 'build_food_plans', return_value=[old]),
+            patch.object(
+                planner, 'choose_food_plan', side_effect=[old, new]
+            ) as select,
+            patch.object(compare.IterativeSearchEngine, 'search') as search,
+        ):
+            proof = compare.prove_snapshot(
+                [case], planner, planner, bot_weights.DEFAULT_WEIGHTS
+            )
         self.assertTrue(proof['verified'])
         self.assertFalse(proof['timed_search_executed'])
         self.assertEqual(select.call_args.args[3], 7)
         search.assert_not_called()
-        with patch.object(planner, 'build_food_plans', return_value=[]), \
-                patch.object(planner, 'choose_food_plan', return_value=None), \
-                self.assertRaisesRegex(ValueError, 'proof failed'):
-            compare.prove_snapshot([case], planner, planner, bot_weights.DEFAULT_WEIGHTS)
+        with (
+            patch.object(planner, 'build_food_plans', return_value=[]),
+            patch.object(planner, 'choose_food_plan', return_value=None),
+            self.assertRaisesRegex(ValueError, 'proof failed'),
+        ):
+            compare.prove_snapshot(
+                [case], planner, planner, bot_weights.DEFAULT_WEIGHTS
+            )
 
-    def test_valid_cli_proof_and_run_keep_hash_manifest_and_explicit_seeds(self):
+    def test_valid_cli_proof_and_run_keep_hash_manifest_and_explicit_seeds(
+        self,
+    ):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
             seeds = root / 'seeds.json'
             seeds.write_text(json.dumps(list(range(20261024, 20261036))))
             cases = root / 'cases.json'
             cases.write_text('[]')
-            planner = compare.load_planner(ROOT / 'snake_bot/food_planner.py',
-                                           compare.sha256(ROOT / 'snake_bot/food_planner.py'), bot_weights.DEFAULT_WEIGHTS)
+            planner = compare.load_planner(
+                ROOT / 'snake_bot/food_planner.py',
+                compare.sha256(ROOT / 'snake_bot/food_planner.py'),
+                bot_weights.DEFAULT_WEIGHTS,
+            )
             for mode in ('proof', 'run'):
                 output = root / mode
-                args = ['--reference', str(ROOT / 'snake_bot/food_planner.py'),
-                        '--candidate', str(ROOT / 'snake_bot/food_planner.py'),
-                        '--weights', str(seeds), '--seed-list', str(seeds),
-                        '--frozen-cases', str(cases), '--output', str(output), '--mode', mode]
-                with patch.object(compare, 'sha256', return_value=compare.WEIGHTS_SHA256), \
-                        patch.object(compare, 'load_weights', return_value=bot_weights.DEFAULT_WEIGHTS), \
-                        patch.object(compare, 'load_planner', return_value=planner), \
-                        patch.object(compare, 'prove_snapshot', return_value={'verified': True}), \
-                        patch.object(compare, 'run_comparison', return_value={}) as run, \
-                        patch('sys.stdout', new_callable=io.StringIO):
+                args = [
+                    '--reference',
+                    str(ROOT / 'snake_bot/food_planner.py'),
+                    '--candidate',
+                    str(ROOT / 'snake_bot/food_planner.py'),
+                    '--weights',
+                    str(seeds),
+                    '--seed-list',
+                    str(seeds),
+                    '--frozen-cases',
+                    str(cases),
+                    '--output',
+                    str(output),
+                    '--mode',
+                    mode,
+                ]
+                with (
+                    patch.object(
+                        compare, 'sha256', return_value=compare.WEIGHTS_SHA256
+                    ),
+                    patch.object(
+                        compare,
+                        'load_weights',
+                        return_value=bot_weights.DEFAULT_WEIGHTS,
+                    ),
+                    patch.object(
+                        compare, 'load_planner', return_value=planner
+                    ),
+                    patch.object(
+                        compare,
+                        'prove_snapshot',
+                        return_value={'verified': True},
+                    ),
+                    patch.object(
+                        compare, 'run_comparison', return_value={}
+                    ) as run,
+                    patch('sys.stdout', new_callable=io.StringIO),
+                ):
                     compare.main(args)
                 if mode == 'proof':
-                    manifest = json.loads((output / 'manifest.json').read_text())
-                    self.assertEqual(manifest['seeds'], list(range(20261024, 20261036)))
+                    manifest = json.loads(
+                        (output / 'manifest.json').read_text()
+                    )
+                    self.assertEqual(
+                        manifest['seeds'], list(range(20261024, 20261036))
+                    )
                     self.assertEqual(manifest['turns'], 400)
-                    self.assertEqual(manifest['exposure_threshold']['minimum_games'], 6)
+                    self.assertEqual(
+                        manifest['exposure_threshold']['minimum_games'], 6
+                    )
                     run.assert_not_called()
                 else:
                     self.assertEqual(run.call_args.args[0]['games'], 24)

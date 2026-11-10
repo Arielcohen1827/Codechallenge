@@ -311,21 +311,44 @@ class ViewerSnapshotCoverageTests(unittest.TestCase):
         self.assertEqual(summary['status'], 'finished')
         self.assertEqual(summary['side'], 'B')
 
-    def test_cli_binds_requested_address_and_closes_on_interrupt_or_error(self):
-        for failure in (KeyboardInterrupt(), RuntimeError('server failure'), None):
+    def test_cli_binds_requested_address_and_closes_on_interrupt_or_error(
+        self,
+    ):
+        for failure in (
+            KeyboardInterrupt(),
+            RuntimeError('server failure'),
+            None,
+        ):
             with self.subTest(failure=failure):
                 server = Mock()
                 server.serve_forever.side_effect = failure
                 output = io.StringIO()
-                with patch('sys.argv', ['match_viewer', '--host', 'localhost', '--port', '1234']), \
-                        patch.object(viewer, 'ThreadingHTTPServer', return_value=server) as factory, \
-                        contextlib.redirect_stdout(output):
+                with (
+                    patch(
+                        'sys.argv',
+                        [
+                            'match_viewer',
+                            '--host',
+                            'localhost',
+                            '--port',
+                            '1234',
+                        ],
+                    ),
+                    patch.object(
+                        viewer, 'ThreadingHTTPServer', return_value=server
+                    ) as factory,
+                    contextlib.redirect_stdout(output),
+                ):
                     if isinstance(failure, RuntimeError):
-                        with self.assertRaisesRegex(RuntimeError, 'server failure'):
+                        with self.assertRaisesRegex(
+                            RuntimeError, 'server failure'
+                        ):
                             viewer.main()
                     else:
                         viewer.main()
-                factory.assert_called_once_with(('localhost', 1234), viewer.ViewerHandler)
+                factory.assert_called_once_with(
+                    ('localhost', 1234), viewer.ViewerHandler
+                )
                 server.serve_forever.assert_called_once_with()
                 server.server_close.assert_called_once_with()
                 self.assertIn('http://localhost:1234', output.getvalue())

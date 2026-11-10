@@ -1,0 +1,627 @@
+<!DOCTYPE html>
+<!-- saved from url=(0065)https://codechallenge-snake-production.up.railway.app/how-to-play -->
+<html lang="es" class="translated-ltr"><head><meta http-equiv="Content-Type" content="text/html; charset=UTF-8">
+
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Snake — How to play</title>
+  <style>
+    body { font-family: system-ui, sans-serif; max-width: 720px; margin: 2rem auto;
+            padding: 0 1rem; line-height: 1.5; color: #222;
+            background: #fff; }
+    code, pre { background: #f4f4f4; padding: .1rem .35rem; border-radius: 4px; }
+    pre { padding: .75rem; overflow-x: auto; }
+    h1, h2 { line-height: 1.2; }
+
+.ex { margin: 1.25rem 0 2rem; }
+.ex-row { display: flex; flex-wrap: wrap; align-items: center; gap: .75rem 1rem; }
+.ex-arrow { font-size: 1.5rem; color: #888; }
+.ex-panel { margin: 0; max-width: 100%; }
+.ex-panel figcaption { font-size: .85rem; color: #555; max-width: 300px;
+                       margin-top: .35rem; }
+.board { display: inline-grid; gap: 1px; background: #d6d6d6;
+         border: 2px solid #555; border-radius: 3px; max-width: 100%;
+         font: bold 12px/1 ui-monospace, monospace; }
+.board span { width: 20px; height: 20px; display: flex; align-items: center;
+              justify-content: center; background: #fff; color: #222; }
+.board .ha { background: #2e7d32; color: #fff; }
+.board .ba { background: #a5d6a7; color: #1b5e20; }
+.board .hb { background: #1565c0; color: #fff; }
+.board .bb { background: #90caf9; color: #0d47a1; }
+.board .fd { background: #fff3c4; color: #9a5b00; }
+.board .mx { background: #f3e5f5; color: #7b1fa2; }
+.board .ta { background: #e8f5e9; color: #2e7d32; font-size: 15px; }
+.board .tb { background: #e3f2fd; color: #1565c0; font-size: 15px; }
+.board .wl { background: #555; color: #fff; }
+.board .bk { background: #ffebee; font-size: 14px; }
+.board .boom { background: #ffe0b2; font-size: 14px; }
+.board .st { background: #fffde7; font-size: 14px; }
+.board .inv { box-shadow: inset 0 0 0 2px #f9a825; }
+.board .zone { background: #ffcdd2; }
+.board .zone.ha, .board .zone.ba, .board .zone.fd, .board .zone.mx,
+.board .zone.hb, .board .zone.bb { box-shadow: inset 0 0 0 2px #ef9a9a; }
+.board .good { box-shadow: inset 0 0 0 3px #2e7d32; }
+.board .bad { box-shadow: inset 0 0 0 3px #d32f2f; }
+.board .shot { background: linear-gradient(#fff 44%, #e65100 44%,
+              #e65100 56%, #fff 56%); }
+.board .go { box-shadow: inset 0 0 0 2px #333; outline: 1px dashed #fff;
+             outline-offset: -5px; }
+.legend { display: flex; flex-wrap: wrap; gap: .4rem 1rem; font-size: .85rem;
+          margin: .5rem 0 1rem; align-items: center; }
+.legend .board { vertical-align: middle; margin-right: .3rem; }
+
+  </style>
+<link type="text/css" rel="stylesheet" charset="UTF-8" href="./Snake — How to play_files/m=el_main_css"></head>
+<body>
+
+<h1>Snake — How to play</h1>
+
+<p>It's the classic
+<a href="https://en.wikipedia.org/wiki/Snake_(video_game_genre)" target="_blank" rel="noopener">Snake</a>
+game (try it at <a href="https://playsnake.org/" target="_blank" rel="noopener">playsnake.org</a>),
+turned into a two-player, turn-based match: each player controls one snake and
+they alternate turns. Grow by eating apples and don't crash.</p>
+
+<figure style="margin:1rem 0;">
+  <img src="./Snake — How to play_files/board.png" alt="Snake board: a snake and an apple on a grid" style="max-width:100%;width:460px;border:1px solid #ccc;border-radius:6px;">
+  <figcaption style="color:#666;font-size:.9rem;">The board: your snake grows as it eats apples.</figcaption>
+</figure>
+
+<h2>Board</h2>
+<ul>
+  <li>A grid rendered as a string (rows wrapped in <code>|...|</code>).</li>
+  <li>Your snake: <code>A</code>/<code>B</code> for the head, lowercase for the body.</li>
+  <li>Food: <code>*</code> &nbsp; Empty: space.</li>
+  <li><strong>From 9 Sep 2026 the food is numbers, not <code>*</code></strong>: five
+      single digits (<code>1</code>–<code>9</code>) are on the board at once and
+      you must eat them <em>in order</em> (see Rules). Empty is still a space.
+      From 30 Sep 2026 each digit appears in several copies (3–5).</li>
+  <li><strong>From 16 Sep 2026 the board also holds <code>X</code> pickups</strong>:
+      eating one is worth <strong>+50</strong> and stacks your score multiplier
+      (<code>x2</code>, then <code>x3</code>, …) for the rest of the match
+      (see Rules).</li>
+  <li><strong>From 23 Sep 2026 the board also holds a <code>#</code> wall</strong>:
+      a straight line (horizontal or vertical) that shrinks toward its centre each
+      round. Running into a <code>#</code> costs <strong>-500</strong> and your snake
+      stays put (see Rules).</li>
+  <li><strong>From 7 Oct 2026 the board can hold tail food,
+      <code>Ⓐ</code> / <code>Ⓑ</code></strong> (the letter in a circle is
+      who may eat it): when a snake crashes, the end of its body turns into tail
+      food that only the <em>opponent</em> can eat (see Rules).</li>
+
+  <li><strong>From 14 Oct 2026 the board also holds proximity bombs</strong>:
+      two big <code>💣</code> and five small <code>🧨</code>. They go off when your
+      snake's head gets <em>near</em> them — within 2 cells of a
+      <code>💣</code>, within 1 cell of a <code>🧨</code> — and wipe your score
+      to <strong>0</strong>. They disappear after round 150 (see Rules).</li>
+
+
+  <li><strong>From 21 Oct 2026 <code>*</code> is back, as shot food</strong>:
+      when a shot hits a snake, the cut-off part of its body turns into
+      <code>*</code> that <em>either</em> snake can eat (see Shooting below).</li>
+
+
+  <li><strong>From 28 Oct 2026 the board can hold a star,
+      <code>⭐</code></strong> (one at a time from round 20, and lots of them
+      in the last 100 moves): eating it counts as food and makes your snake
+      <strong>invincible for 50 turns</strong>. An invincible snake is drawn
+      <em>inverted</em>: lowercase head (<code>a</code>/<code>b</code>), uppercase
+      body (<code>A</code>/<code>B</code>) (see Star below).</li>
+
+
+  <li><strong>From 4 Nov 2026 the board is a 3D cube</strong> of
+      20×20×20 (levels × rows × cols). You no longer get
+      the whole board: only the <strong>three planes through your snake’s
+      head</strong>, <code>board_x</code>, <code>board_y</code> and
+      <code>board_z</code> (see 3D cube below).</li>
+
+  <li><strong>The board size varies from match to match</strong> (from 2 Sep 2026):
+      each dimension is chosen at random between <code>12</code> and
+      <code>20</code> (<strong>between <code>20</code> and <code>30</code> from
+      14 Oct 2026</strong>, to make room around the bombs), so the board is <em>not necessarily square</em>. Read <code>rows</code>,
+      <code>cols</code> and <code>board_size</code> from <code>turn_data</code> each
+      game — don't assume 15×15. From 4 Nov 2026 it is a
+      fixed 20×20×20 cube.</li>
+</ul>
+
+<h2>Your turn</h2>
+<p>Send a <code>direction</code> and your snake advances one cell:</p>
+<pre>{ "action": "move", "data": { "direction": "up" } }</pre>
+<p><code>direction</code> is one of <code>up</code>, <code>down</code>,
+<code>left</code>, <code>right</code>.</p>
+<p><strong>From 4 Nov 2026 you can also go up or down a level</strong>
+in the cube, with <code>ascend</code> (level − 1) and <code>descend</code>
+(level + 1). <code>up</code>/<code>down</code>/<code>left</code>/<code>right</code>
+still move within your level:</p>
+<pre>{ "action": "move", "data": { "direction": "ascend" } }</pre>
+<p><strong>From 21 Oct 2026 you can shoot instead of moving</strong>
+(it costs <strong>5000</strong> points, see Shooting below):</p>
+<pre>{ "action": "shoot", "data": { "direction": "right" } }</pre>
+
+<h2>Rules &amp; scoring</h2>
+<ul>
+  <li>Eat food (<code>*</code>) to grow: <strong>+100</strong>, and new food spawns.</li>
+  <li>Surviving a move: <strong>+1</strong>.</li>
+  <li>Crashing into a wall, your own body, or the opponent ends the game:
+      you lose <strong>-500</strong>, the opponent wins <strong>+1000</strong>.
+      <strong>From 7 Oct 2026 a crash no longer ends the game</strong> (see Crashes
+      below).</li>
+  <li>If nobody crashes within the remaining moves, the higher score wins.</li>
+</ul>
+<p><strong>Numbered food (from 9 Sep 2026):</strong> instead of <code>*</code>, the
+board shows five digits you must eat <em>in ascending, cyclic order</em>
+(…7, 8, 9, 1, 2… — there is no <code>0</code>). At the start the
+digits <code>1</code>–<code>5</code> are on the board; each time the current
+one is eaten, the next digit in the sequence appears, so five consecutive digits are
+always in play.</p>
+<ul>
+  <li>Eating the <strong>correct</strong> next digit grows you and scores
+      <strong>digit × 100</strong> (so a <code>1</code> scores 100, a <code>9</code>
+      scores 900).</li>
+  <li>Eating <strong>any other</strong> digit is a penalty of <strong>-500</strong>
+      and that same digit reappears elsewhere.</li>
+  <li>The next digit to eat is the one on the board whose cyclic predecessor
+      (…8, 9, 1…) is <em>not</em> present — compute it from the
+      board.</li>
+</ul>
+<p><strong>Careful — the next digit is <em>not</em> simply the smallest one
+on the board.</strong> Because the five-digit window slides and wraps past 9, once
+it holds both high and low digits the target is the one continuing the sequence, not
+the lowest. For example, with <code>1&nbsp;6&nbsp;7&nbsp;8&nbsp;9</code> on the board
+the next digit is <strong>6</strong> (you already ate 1–5), <em>not</em>
+<code>1</code> — eating that <code>1</code> is a −500 penalty. Always
+derive the target from the cyclic-predecessor rule above, don't just grab the
+smallest number.</p>
+<p><strong>Multipliers (from 16 Sep 2026):</strong> two <code>X</code> pickups sit on
+the board alongside the food. Eating an <code>X</code> scores a flat
+<strong>+50</strong> and bumps <em>your</em> multiplier one step —
+<code>x2</code> after the first, <code>x3</code> after the second, and so on —
+and a replacement <code>X</code> appears elsewhere.</p>
+<ul>
+  <li>The multiplier applies to <strong>food points only</strong>: eating the correct
+      digit scores <em>digit × 100 × multiplier</em> (a <code>9</code>
+      at <code>x3</code> is 2700).</li>
+  <li>The <code>+50</code> of the <code>X</code> itself, the <code>+1</code> per move
+      and the penalties (<code>-500</code>) are <strong>not</strong> multiplied.</li>
+  <li>It is <strong>permanent</strong>: once earned it lasts the whole match and keeps
+      stacking. Eating a wrong digit does not reset it.</li>
+  <li>An <code>X</code> does <strong>not</strong> grow your snake, and each multiplier
+      is per player — read yours from <code>multiplier_1</code> /
+      <code>multiplier_2</code> in <code>turn_data</code>.</li>
+</ul>
+<p><strong>Walls (from 23 Sep 2026):</strong> the board holds one <code>#</code> wall
+at a time — a straight line (horizontal or vertical) of an odd length up to
+<strong>11</strong>, placed at random on empty cells.</p>
+<ul>
+  <li>Running your head into a <code>#</code> is a <strong>-500</strong> penalty and
+      your snake <em>does not move</em> that turn — the game continues (it is
+      <em>not</em> an instant game over).</li>
+  <li>After both players have moved, the wall <strong>shrinks toward its centre</strong>
+      (it loses one cell at each end), so a length-11 wall goes 11→9→7→
+      …→1→gone.</li>
+  <li>Once a wall is gone a new one appears elsewhere. Read it straight from the
+      board (the <code>#</code> cells); there is no separate field.</li>
+</ul>
+<p><strong>Multiple copies (from 30 Sep 2026):</strong> each of the five window
+digits now appears in <strong>several copies</strong> (a random 3–5 per digit)
+instead of a single cell, so the next digit can't be monopolised by camping one
+spot.</p>
+<ul>
+  <li>The order rule is unchanged: eat the target digit (the cyclic-predecessor
+      one). It scores <em>digit × 100 × multiplier</em> once and grows
+      you once, for the single copy you ate.</li>
+  <li>Eating the target <strong>removes every remaining copy of that digit</strong>
+      and the next digit appears in its own 3–5 copies. So only one copy of
+      each digit is ever worth points.</li>
+  <li>Eating a wrong digit is still a <strong>-500</strong> penalty (only that copy
+      is consumed and a replacement of the same digit reappears).</li>
+</ul>
+<p><strong>Crashes and longer matches (from 7 Oct 2026):</strong> matches last
+<strong>400 moves</strong> (200 per player) instead of 300, and crashing — into
+your own body, the board edge, a <code>#</code> wall or the opponent —
+<strong>no longer ends the game</strong>. Instead:</p>
+<ul>
+  <li>Your snake <strong>does not move</strong> that turn (it stays where it was,
+      like with a <code>#</code>).</li>
+  <li>It <strong>loses its tail</strong>: it keeps its first 3 cells (head + 2) and
+      the rest of its body turns into <strong>tail food for the opponent</strong>.
+      A snake of 3 cells loses nothing.</li>
+  <li>Your <strong>first</strong> crash <strong>wipes your score to 0</strong>.
+      Every later crash is the usual <strong>-500</strong>. If your score is already
+      <code>0</code> or negative at your first crash, the usual -500 applies
+      — crashing is never a way to clear a negative score (it still counts as
+      your first crash).</li>
+  <li>The opponent gets nothing for your crash (no <strong>+1000</strong>). As
+      before, falling below <strong>-2500</strong> ends the game and you lose.</li>
+  <li><strong>Tail food</strong> is drawn with the letter of the snake that may eat
+      it, in a circle: <code>Ⓐ</code> (U+24B6) can only be eaten by
+      <code>A</code>, <code>Ⓑ</code> (U+24B7) only by <code>B</code>. So your
+      crash feeds your rival, never you. Eating it, in any order and at any time,
+      is <strong>+100 × your multiplier</strong> and you grow one cell. It is
+      not part of the digit sequence (no penalty) and is not replaced once eaten.
+      In the JSON these arrive as <code>"Ⓐ"</code> / <code>"Ⓑ"</code>
+      — one character each once decoded.</li>
+  <li>The snake that shed it can step on it: the cell is <strong>cleared</strong>,
+      with no points and no growth (a normal +1 move). That is a way to deny the
+      food to your rival.</li>
+
+  <li>From 14 Oct 2026, tail cells that would land inside a bomb’s blast zone
+      just vanish (nothing edible is ever within reach of a bomb).</li>
+
+</ul>
+
+<p><strong>Proximity bombs (from 14 Oct 2026):</strong> two big <code>💣</code> and
+five small <code>🧨</code> bombs sit on the board, and boards grow to 20–30 per
+side to leave room around them. You don't have to touch them: a bomb
+explodes as soon as your snake's <em>head</em> moves within its reach.</p>
+<ul>
+  <li><code>💣</code> (big) explodes when your head ends a move <strong>2 cells or
+      closer</strong> to it; <code>🧨</code> (small) at <strong>1 cell or
+      closer</strong>. Diagonals count as one cell (the distance is
+      <code>max(|Δrow|, |Δcol|)</code>), so the blast zone is a
+      5×5 square around a <code>💣</code> and a 3×3 square around a
+      <code>🧨</code>.</li>
+  <li>An explosion <strong>wipes your score to 0</strong> (if your score is already
+      <code>0</code> or negative, it is a <strong>-500</strong> penalty instead).
+      Two bombs in reach at once count once. Your move still happens — you
+      eat whatever was on the cell — you keep your tail, and the game
+      continues. An explosion is not a crash.</li>
+  <li><strong>Nothing edible is ever inside a blast zone</strong>: food and
+      <code>X</code> never appear within reach of a bomb, and bombs never appear
+      with food or an <code>X</code> within their reach. Everything you need to eat
+      can be eaten without setting a bomb off.</li>
+  <li>The exploded bomb disappears and a new one of the same size appears elsewhere,
+      never within reach of either snake's head.</li>
+  <li>Only the head triggers bombs (your body only goes where your head has already
+      been).</li>
+  <li><strong>After round 150</strong> (once each player has made 150 moves, i.e.
+      with 100 moves left) every bomb disappears for good: the end of the match is
+      bomb-free.</li>
+</ul>
+
+
+<p><strong>Shooting (from 21 Oct 2026):</strong> on your turn you can send
+<code>"action": "shoot"</code> with a <code>direction</code> instead of moving.
+Your snake <em>does not move</em> that turn; the shot flies from your head in that
+direction.</p>
+<ul>
+  <li>Every shot costs <strong>5000</strong> points, <em>hit or miss</em>. You
+      need a score of at least <strong>5000</strong> to shoot: with less, the shot
+      doesn't fire and it is an invalid action (the usual
+      <strong>-500</strong>).</li>
+  <li>The shot is <strong>instant</strong> and goes in a straight line. It passes
+      over your own body, food, <code>X</code> and bombs (it doesn't set them
+      off), and stops at the board edge, a <code>#</code> wall (walls are
+      cover) or the first cell of the opponent's snake.</li>
+  <li>A hit <strong>cuts the opponent</strong> from the hit cell to the end of its
+      tail. Hitting the <em>head</em> leaves just the head (a snake of length 1).
+      A shot can only hit the opponent, never your own snake.</li>
+  <li>The cut cells turn into <strong><code>*</code> shot food</strong> that
+      <em>either</em> snake can eat, in any order: <strong>+100 × your
+      multiplier</strong> and you grow one cell. It is not part of the digit
+      sequence (no penalty) and is not replaced once eaten. Cut cells inside a
+      bomb’s blast zone just vanish.</li>
+  <li>The opponent <strong>loses no points</strong>: being shot is not a crash
+      (no score wipe, no -500, it doesn't count as its first crash). It just
+      loses length — and maybe the race to eat its own tail back.</li>
+  <li>The shot is echoed back in <code>play_data</code> as
+      <code>"action": "shoot"</code> plus its <code>direction</code>.</li>
+</ul>
+
+
+<p><strong>Star (from 28 Oct 2026):</strong> now and then a <code>⭐</code>
+appears on the board. Eat it (move onto it) and your snake is <strong>invincible
+for your next 50 turns</strong>.</p>
+<ul>
+  <li>Eating the star is like eating a <code>*</code>: <strong>+100 × your
+      multiplier</strong> and you grow one cell (it is not part of the digit
+      sequence, no penalty). Eating another star while invincible restarts the
+      count at 50. <code>turn_data</code> counts the turns left in <code>invincible_1</code> /
+      <code>invincible_2</code> (<code>0</code> = not invincible). Every turn of
+      yours counts, whatever you do (move, shoot, invalid action or timeout).</li>
+  <li>While invincible your snake is drawn <strong>inverted</strong>: the head is
+      lowercase (<code>a</code>/<code>b</code>) and the body uppercase
+      (<code>A</code>/<code>B</code>). Find your head by its case <em>and</em>
+      <code>invincible_N</code>, not by the case alone.</li>
+  <li><strong>You lose no points for anything.</strong> Running into the board
+      edge, a <code>#</code> wall or your own body: you just <strong>stay
+      put</strong> (no -500, no score wipe, no tail lost, it doesn't count as your
+      first crash). Bombs still go off when you get near, but don't touch your
+      score. Eating a digit out of order costs nothing (it still reappears
+      elsewhere and you grow). Invalid actions cost nothing either (but 10
+      timeouts still lose the match). Shots still cost 5000: that's spending, not
+      losing.</li>
+  <li><strong>Running into the rival cuts it like a shot</strong>, for free: from
+      the cell you hit to the end of its tail (hitting the head leaves just the
+      head), and those cells become <code>*</code> shot food anyone can eat. You
+      stay put. The rival loses no points. This works even if the rival is
+      invincible too.</li>
+  <li>Shots can't cut an invincible snake: a shot that hits it stops there and
+      cuts nothing (the shooter still pays 5000). A rival that isn't invincible
+      running into it crashes as usual.</li>
+  <li><strong>When it appears:</strong> there is never more than one star. The
+      first one appears after <strong>round 20</strong> (once each player has
+      made 20 moves). While a snake is invincible there is no star; when its 50
+      turns run out, the next star appears <strong>20 rounds later</strong>.</li>
+  <li><strong>Where:</strong> on a free cell at the <em>same distance</em> from
+      both heads (counting <code>|Δrow| + |Δcol|</code> and ignoring
+      obstacles), as close as the board allows, and never inside a bomb's blast
+      zone. It's a race.</li>
+  <li><strong>Star frenzy:</strong> when <code>remaining_moves</code> reaches
+      <strong>100</strong> (round 150 of a 400-move match, when the bombs go away)
+      the board fills up with <strong>10 stars</strong> on random free cells.
+      Every star eaten is replaced right away, until the end of the match. Both
+      snakes can be invincible at once, and invincible snakes cut each other.</li>
+</ul>
+
+
+<p><strong>3D cube (from 4 Nov 2026):</strong> the board is a
+<strong>20×20×20</strong> cube. A cell is
+<code>(level, row, col)</code>; level <code>0</code> is the top one, like row
+<code>0</code> is the top row. Every rule above still applies, in three
+dimensions.</p>
+<ul>
+  <li><strong>Moving:</strong> <code>ascend</code> goes one level up (level
+      − 1), <code>descend</code> one level down (level + 1).
+      <code>up</code>/<code>down</code>/<code>left</code>/<code>right</code> move
+      within your level as before. Both snakes start on the middle level
+      (level 10), in the same spots as on a flat board.</li>
+  <li><strong>What you see:</strong> only the three planes that go through your
+      head, each drawn like a flat board (<code>|...|</code> lines):
+    <ul>
+      <li><code>board_z</code>: your level seen from above, rows × cols
+          (the classic board).</li>
+      <li><code>board_y</code>: your row seen from the front, levels × cols
+          (line <em>i</em> is level <em>i</em>).</li>
+      <li><code>board_x</code>: your column seen from the side, levels × rows
+          (line <em>i</em> is level <em>i</em>, character <em>j</em> is row
+          <em>j</em>).</li>
+    </ul>
+    <code>head</code> tells you where your head is
+    (<code>{"level": 10, "row": 1, "col": 2}</code>), and <code>board</code> holds
+    the three planes in the order x, y, z, separated by a blank line.</li>
+  <li><strong>Anything off your planes is invisible</strong>: food, pickups,
+      walls, bombs, stars and the rival. You see the rival only when it crosses
+      one of your planes. Remember what you have seen: the cube doesn’t
+      change much from one turn to the next.</li>
+  <li><strong>Edges:</strong> the cube has six faces. Leaving through the top
+      (<code>ascend</code> from level 0) or the bottom (<code>descend</code>
+      from level 19) is a crash like any other edge.</li>
+  <li><strong>More of everything</strong>, so the cube isn’t empty: each
+      window digit comes in <strong>10–15 copies</strong> (instead of
+      3–5), there are <strong>6 <code>X</code></strong> (instead of 2),
+      <strong>6 <code>💣</code> and 15 <code>🧨</code></strong> (instead of 2 and
+      5), and the star frenzy brings <strong>30 stars</strong> (instead of 10).
+      Food order and points are unchanged.</li>
+  <li><strong>Walls are square plates:</strong> a <code>#</code> wall is now a
+      square of odd side (3–11) lying flat on one axis: a floor/ceiling or a
+      vertical wall. Each round it loses its outer ring
+      (11×11 → 9×9 → … → 1 → gone). On your
+      planes a plate shows up as a line or as a square.</li>
+  <li><strong>Bombs reach in 3D:</strong> the distance is
+      <code>max(|Δlevel|, |Δrow|, |Δcol|)</code>, so the blast
+      zone is a 5×5×5 cube around a <code>💣</code> and
+      3×3×3 around a <code>🧨</code>. A bomb on the level above or
+      below can go off even if it is not on any of your planes. Nothing edible
+      is ever inside a blast zone, and bombs still disappear after round 150.</li>
+  <li><strong>Shooting</strong> works in all six directions, including
+      <code>ascend</code>/<code>descend</code>.</li>
+  <li><strong>The star</strong> appears at the same distance from both heads,
+      now counting <code>|Δlevel| + |Δrow| + |Δcol|</code>, and
+      on a cell that <em>both</em> snakes can see when it appears (on one of each
+      head’s planes).</li>
+</ul>
+
+
+<h2>turn_data</h2>
+<p>Each turn you receive <code>board</code>, <code>rows</code>, <code>cols</code>,
+<code>remaining_moves</code>, your <code>side</code>, and
+<code>player_1/2</code> / <code>score_1/2</code>.</p>
+<p>From 2 Sep 2026 you also receive <code>board_size</code>, the board dimensions as a
+<code>"rows x cols"</code> string (e.g. <code>"15x18"</code>).</p>
+<p>From 16 Sep 2026 you also receive <code>multiplier_1</code> and
+<code>multiplier_2</code>, each player's current score multiplier (starts at
+<code>1</code>). It is the only piece of state you cannot read off the board.</p>
+<p>From 28 Oct 2026 you also receive <code>invincible_1</code> and
+<code>invincible_2</code>: how many turns of star invincibility each player has
+left (<code>0</code> = not invincible).</p>
+<p>From 4 Nov 2026 you also receive <code>levels</code>
+(<code>20</code>), <code>head</code> (<code>{"level", "row", "col"}</code> of your
+head) and the three planes <code>board_x</code>, <code>board_y</code>,
+<code>board_z</code>; <code>board</code> holds those same three planes and
+<code>board_size</code> is <code>"levels x rows x cols"</code>
+(<code>"20x20x20"</code>). There is no field with the whole cube.</p>
+<p><strong>Read the food and snake positions from the <code>board</code>:</strong>
+food is <code>*</code> (or a digit <code>1</code>–<code>9</code> from 9 Sep 2026;
+from 7 Oct 2026 <code>Ⓐ</code>/<code>Ⓑ</code> are tail food only
+<code>A</code>/<code>B</code> can eat; from 21 Oct 2026 <code>*</code> is
+shot food anyone can eat),
+<code>X</code> is a multiplier pickup (from 16 Sep 2026),
+<code>#</code> is a wall (from 23 Sep 2026),
+<code>💣</code>/<code>🧨</code> are big/small proximity bombs (from 14 Oct 2026),
+<code>⭐</code> is the star (from 28 Oct 2026),
+<code>A</code>/<code>B</code> are the snake heads and <code>a</code>/<code>b</code> their
+bodies (inverted while that snake is invincible, from 28 Oct 2026).
+They are not provided as separate fields.</p>
+<p><strong>Non-ASCII symbols — read the board by character, not by
+byte.</strong> From 7 Oct 2026 the board can contain <code>Ⓐ</code>/<code>Ⓑ</code>
+(tail food), and from 14 Oct 2026 <code>💣</code>/<code>🧨</code>
+(bombs). Each cell is still exactly <strong>one Unicode character</strong>
+(code point), so split rows into characters, not bytes or UTF-16 units:</p>
+<ul>
+  <li>Python: <code>list(row)</code> / <code>row[i]</code> just work.</li>
+  <li>JavaScript / TypeScript: <code>Array.from(row)</code> or <code>[...row]</code>.</li>
+  <li>Java: <code>row.codePoints().toArray()</code>; C#: <code>row.EnumerateRunes()</code>.</li>
+  <li>Go: <code>[]rune(row)</code>; Rust: <code>row.chars()</code>.</li>
+</ul>
+<p><strong><code>Ⓐ</code>/<code>Ⓑ</code> in JavaScript:</strong> they are
+<code>U+24B6</code> and <code>U+24B7</code>, inside the Basic Multilingual Plane, so
+each one is a <em>single</em> UTF-16 unit: <code>row.length</code> and
+<code>row[i]</code> keep working (the same holds in Java and C#). In the JSON they
+arrive as <code>"\u24b6"</code> / <code>"\u24b7"</code> and <code>JSON.parse</code>
+turns them back into one character. Compare against the escapes, so your source
+file's encoding doesn't matter:</p>
+<pre>const TAIL_FOOD = { A: '\u24B6', B: '\u24B7' };   // Ⓐ / Ⓑ<font></font>
+const cells = [...row];             // safe for every symbol on the board<font></font>
+if (cells[c] === TAIL_FOOD[side]) {<font></font>
+  // tail food only *you* can eat (+100 x multiplier)<font></font>
+} else if (Object.values(TAIL_FOOD).includes(cells[c])) {<font></font>
+  // your own shed tail: stepping on it just clears it<font></font>
+}</pre>
+<p>Only code that indexes raw bytes (Go <code>row[i]</code> on a string, C
+<code>char*</code>) sees them as several units: each is 3 bytes in UTF-8.</p>
+<p>This matters for the bombs: <code>💣</code> and <code>🧨</code> are
+outside the Basic Multilingual Plane, so in JavaScript, Java and C#
+<code>row.length</code> and <code>row[i]</code> count each of them as <em>two</em>
+units and every later column shifts. In the JSON they arrive as surrogate-pair
+escapes (<code>"\ud83d\udca3"</code>, <code>"\ud83e\udde8"</code>), which any JSON
+decoder turns back into one character.</p>
+<p>The star <code>⭐</code> (from 28 Oct 2026) is <code>U+2B50</code>,
+inside the Basic Multilingual Plane like <code>Ⓐ</code>/<code>Ⓑ</code>:
+one UTF-16 unit, <code>"⭐"</code> in the JSON. It is sent bare, without the
+<code>U+FE0F</code> emoji variation selector, so it is always exactly one
+character.</p>
+
+<h2>Example log (events &amp; actions)</h2>
+<p>A whole match as your bot sees it — events received
+(<code>&lt;</code>) and actions sent (<code>&gt;</code>). This is exactly the
+format the example clients write to <code>game_&lt;id&gt;.log</code> (boards
+abbreviated here):</p>
+<pre style="white-space:pre-wrap;word-break:break-word;">&lt; {"event": "list_users", "data": {"users": ["ana@x.com", "beto@x.com"]}}<font></font>
+&lt; {"event": "challenge", "data": {"opponent": "ana@x.com", "challenge_id": "c_1a2b"}}<font></font>
+&gt; {"action": "accept_challenge", "data": {"challenge_id": "c_1a2b"}}<font></font>
+&lt; {"event": "your_turn", "data": {"board": "|aaA .. * .. Bbb| ...(15x18)", "remaining_moves": 300, "board_size": "15x18", "side": "A", "player_1": "beto@x.com", "score_1": 0, "player_2": "ana@x.com", "score_2": 0, "game_id": "g_9f", "turn_token": "t_01"}}<font></font>
+&gt; {"action": "move", "data": {"game_id": "g_9f", "turn_token": "t_01", "direction": "right"}}<font></font><font dir="auto" style="vertical-align: inherit;"><font dir="auto" style="vertical-align: inherit;">
+&lt; {"evento": "tu_turno", "datos": {"tablero": "...(15x18)", "movimientos_restantes": 298, "tamaño_tablero": "15x18", "lado": "A", "jugador_1": "beto@x.com", "puntuación_1": 1, "jugador_2": "ana@x.com", "puntuación_2": 1, "id_juego": "g_9f", "ficha_turno": "t_02"}}</font></font><font></font><font dir="auto" style="vertical-align: inherit;"><font dir="auto" style="vertical-align: inherit;">
+&gt; {"acción": "mover", "datos": {"id_juego": "g_9f", "ficha_turno": "t_02", "dirección": "abajo"}}</font></font><font></font><font dir="auto" style="vertical-align: inherit;"><font dir="auto" style="vertical-align: inherit;">
+&lt; {"evento": "fin_de_juego", "datos": {"tablero": "...", "movimientos_restantes": 0, "tamaño_tablero": "15x18", "lado": "", "jugador_1": "beto@x.com", "puntuación_1": 100, "jugador_2": "ana@x.com", "puntuación_2": 6350, "ganador": "ana@x.com", "id_juego": "g_9f"}}</font></font><font></font>
+</pre>
+
+<p><font dir="auto" style="vertical-align: inherit;"><font dir="auto" style="vertical-align: inherit;">Lo </font></font><code>"board"</code><font dir="auto" style="vertical-align: inherit;"><font dir="auto" style="vertical-align: inherit;">anterior es una versión abreviada. En realidad, se trata de la cuadrícula completa ( </font></font><code>rows</code><font dir="auto" style="vertical-align: inherit;"><font dir="auto" style="vertical-align: inherit;">× </font></font><code>cols</code><font dir="auto" style="vertical-align: inherit;"><font dir="auto" style="vertical-align: inherit;">, aquí 15×18) como una sola cadena, con las filas unidas por </font></font><code>\n</code><font dir="auto" style="vertical-align: inherit;"><font dir="auto" style="vertical-align: inherit;">. Al aplicar esos saltos de línea, un tablero a mitad de partida se ve así:</font></font></p>
+<pre><font dir="auto" style="vertical-align: inherit;"><font dir="auto" style="vertical-align: inherit;">| |</font></font><font></font><font dir="auto" style="vertical-align: inherit;"><font dir="auto" style="vertical-align: inherit;">
+| un # |</font></font><font></font><font dir="auto" style="vertical-align: inherit;"><font dir="auto" style="vertical-align: inherit;">
+| un # |</font></font><font></font><font dir="auto" style="vertical-align: inherit;"><font dir="auto" style="vertical-align: inherit;">
+| aaA # |</font></font><font></font><font dir="auto" style="vertical-align: inherit;"><font dir="auto" style="vertical-align: inherit;">
+| # |</font></font><font></font><font dir="auto" style="vertical-align: inherit;"><font dir="auto" style="vertical-align: inherit;">
+| |</font></font><font></font><font dir="auto" style="vertical-align: inherit;"><font dir="auto" style="vertical-align: inherit;">
+| bb |</font></font><font></font><font dir="auto" style="vertical-align: inherit;"><font dir="auto" style="vertical-align: inherit;">
+| b |</font></font><font></font><font dir="auto" style="vertical-align: inherit;"><font dir="auto" style="vertical-align: inherit;">
+| * b X |</font></font><font></font><font dir="auto" style="vertical-align: inherit;"><font dir="auto" style="vertical-align: inherit;">
+| bbbbB |</font></font><font></font><font dir="auto" style="vertical-align: inherit;"><font dir="auto" style="vertical-align: inherit;">
+| *|</font></font><font></font><font dir="auto" style="vertical-align: inherit;"><font dir="auto" style="vertical-align: inherit;">
+| * |</font></font><font></font><font dir="auto" style="vertical-align: inherit;"><font dir="auto" style="vertical-align: inherit;">
+| |</font></font><font></font><font dir="auto" style="vertical-align: inherit;"><font dir="auto" style="vertical-align: inherit;">
+| X |</font></font><font></font><font dir="auto" style="vertical-align: inherit;"><font dir="auto" style="vertical-align: inherit;">
+| |</font></font></pre>
+<p><font dir="auto" style="vertical-align: inherit;"><font dir="auto" style="vertical-align: inherit;">Así </font></font><code>A</code><font dir="auto" style="vertical-align: inherit;"><font dir="auto" style="vertical-align: inherit;">son </font></font><code>B</code><font dir="auto" style="vertical-align: inherit;"><font dir="auto" style="vertical-align: inherit;">las cabezas de serpiente, </font></font><code>a</code><font dir="auto" style="vertical-align: inherit;"><font dir="auto" style="vertical-align: inherit;">sus </font></font><code>b</code><font dir="auto" style="vertical-align: inherit;"><font dir="auto" style="vertical-align: inherit;">
+cuerpos, </font></font><code>*</code><font dir="auto" style="vertical-align: inherit;"><font dir="auto" style="vertical-align: inherit;">la comida, </font></font><code>X</code><font dir="auto" style="vertical-align: inherit;"><font dir="auto" style="vertical-align: inherit;">un multiplicador de recolección (desde el 16 de septiembre de 2026) y </font></font><code>#</code><font dir="auto" style="vertical-align: inherit;"><font dir="auto" style="vertical-align: inherit;">una pared (desde el 23 de septiembre de 2026).</font></font></p>
+
+<h2><font dir="auto" style="vertical-align: inherit;"><font dir="auto" style="vertical-align: inherit;">Cambios en las reglas</font></font></h2>
+<p><font dir="auto" style="vertical-align: inherit;"><font dir="auto" style="vertical-align: inherit;">Las reglas evolucionan con el tiempo. Cada cambio se implementa como una versión numerada del juego con una fecha de activación; mantén tu bot preparado para las próximas novedades.</font></font></p>
+<ul>
+
+  <li><strong><font dir="auto" style="vertical-align: inherit;"><font dir="auto" style="vertical-align: inherit;">v11 — 4 de noviembre de 2026:</font></font></strong><font dir="auto" style="vertical-align: inherit;"><font dir="auto" style="vertical-align: inherit;"> el tablero es un cubo de 20×20×20. Nuevas direcciones </font></font><code>ascend</code><font dir="auto" style="vertical-align: inherit;"><font dir="auto" style="vertical-align: inherit;">/
+       </font></font><code>descend</code><font dir="auto" style="vertical-align: inherit;"><font dir="auto" style="vertical-align: inherit;">. Cada robot ve solo los tres planos a través de su cabeza ( </font></font><code>board_x</code><font dir="auto" style="vertical-align: inherit;"><font dir="auto" style="vertical-align: inherit;">, </font></font><code>board_y</code><font dir="auto" style="vertical-align: inherit;"><font dir="auto" style="vertical-align: inherit;">, </font></font><code>board_z</code><font dir="auto" style="vertical-align: inherit;"><font dir="auto" style="vertical-align: inherit;">, más
+       </font></font><code>head</code><font dir="auto" style="vertical-align: inherit;"><font dir="auto" style="vertical-align: inherit;">y </font></font><code>levels</code><font dir="auto" style="vertical-align: inherit;"><font dir="auto" style="vertical-align: inherit;">). 10–15 copias por dígito, 6 </font></font><code>X</code><font dir="auto" style="vertical-align: inherit;"><font dir="auto" style="vertical-align: inherit;">, 6 </font></font><code>💣</code><font dir="auto" style="vertical-align: inherit;"><font dir="auto" style="vertical-align: inherit;">+ 15 </font></font><code>🧨</code><font dir="auto" style="vertical-align: inherit;"><font dir="auto" style="vertical-align: inherit;">con zonas de explosión cúbicas, 30 estrellas de frenesí. Las paredes son placas cuadradas que se encogen; la estrella aparece donde ambas cabezas pueden verla.</font></font></li>
+
+
+  <li><strong><font dir="auto" style="vertical-align: inherit;"><font dir="auto" style="vertical-align: inherit;">v10 — 28 oct. 2026:</font></font></strong><font dir="auto" style="vertical-align: inherit;"><font dir="auto" style="vertical-align: inherit;"> una </font></font><code>⭐</code><font dir="auto" style="vertical-align: inherit;"><font dir="auto" style="vertical-align: inherit;">estrella (una a la vez desde la ronda 20, la siguiente 20 rondas después de que termine una invencibilidad, equidistante de ambas cabezas; 10 a la vez, reemplazadas a medida que se comen, en los últimos 100 movimientos). Comerla es como comer un </font></font><code>*</code><font dir="auto" style="vertical-align: inherit;"><font dir="auto" style="vertical-align: inherit;">(+100 × multiplicador, creces) y hace que tu serpiente sea invencible durante 50 turnos ( </font></font><code>invincible_1/2</code><font dir="auto" style="vertical-align: inherit;"><font dir="auto" style="vertical-align: inherit;">en </font></font><code>turn_data</code><font dir="auto" style="vertical-align: inherit;"><font dir="auto" style="vertical-align: inherit;">, dibujada con una cabeza minúscula y un cuerpo mayúscula). No pierde puntos por nada, los choques la dejan en su lugar, y chocar con el rival la corta como un disparo (incluso un rival invencible). Los disparos no la cortan.</font></font></li>
+
+
+  <li><strong><font dir="auto" style="vertical-align: inherit;"><font dir="auto" style="vertical-align: inherit;">v9 — 21 oct. 2026:</font></font></strong><font dir="auto" style="vertical-align: inherit;"><font dir="auto" style="vertical-align: inherit;"> Disparo: envía
+       </font></font><code>"action": "shoot"</code><font dir="auto" style="vertical-align: inherit;"><font dir="auto" style="vertical-align: inherit;">con un </font></font><code>direction</code><font dir="auto" style="vertical-align: inherit;"><font dir="auto" style="vertical-align: inherit;">en lugar de moverte. Cuesta </font></font><strong><font dir="auto" style="vertical-align: inherit;"><font dir="auto" style="vertical-align: inherit;">5000</font></font></strong><font dir="auto" style="vertical-align: inherit;"><font dir="auto" style="vertical-align: inherit;"> (acierto o fallo; necesitas al menos 5000), vuela en línea recta, las </font></font><code>#</code><font dir="auto" style="vertical-align: inherit;"><font dir="auto" style="vertical-align: inherit;">paredes lo detienen y corta al oponente desde la celda impactada hasta su cola. Las celdas cortadas se convierten en
+       </font></font><code>*</code><font dir="auto" style="vertical-align: inherit;"><font dir="auto" style="vertical-align: inherit;">comida que cualquiera puede comer (+100 × multiplicador). El oponente no pierde puntos.</font></font></li>
+
+
+  <li><strong><font dir="auto" style="vertical-align: inherit;"><font dir="auto" style="vertical-align: inherit;">v8 — 14 oct. 2026:</font></font></strong><font dir="auto" style="vertical-align: inherit;"><font dir="auto" style="vertical-align: inherit;"> Bombas de proximidad: dos grandes
+       </font></font><code>💣</code><font dir="auto" style="vertical-align: inherit;"><font dir="auto" style="vertical-align: inherit;">explotan cuando una cabeza de serpiente se acerca a 2 casillas, cinco pequeñas
+       </font></font><code>🧨</code><font dir="auto" style="vertical-align: inherit;"><font dir="auto" style="vertical-align: inherit;">a 1 casilla; una explosión borra la puntuación </font></font><code>0</code><font dir="auto" style="vertical-align: inherit;"><font dir="auto" style="vertical-align: inherit;">
+      y la bomba reaparece en otro lugar. Nunca hay nada comestible dentro de una zona de explosión. Después de la ronda 150, todas las bombas desaparecen. Los tableros crecen a 20-30 por lado.</font></font></li>
+
+  <li><strong><font dir="auto" style="vertical-align: inherit;"><font dir="auto" style="vertical-align: inherit;">v7 — 7 oct. 2026:</font></font></strong><font dir="auto" style="vertical-align: inherit;"><font dir="auto" style="vertical-align: inherit;"> los choques (cuerpo propio, borde del tablero,
+       </font></font><code>#</code><font dir="auto" style="vertical-align: inherit;"><font dir="auto" style="vertical-align: inherit;">pared u oponente) ya no terminan la partida: la serpiente se queda donde está, conserva 3 casillas y el resto de su cuerpo se convierte en comida para la cola que solo el oponente puede comer ( </font></font><code>Ⓐ</code><font dir="auto" style="vertical-align: inherit;"><font dir="auto" style="vertical-align: inherit;">/ </font></font><code>Ⓑ</code><font dir="auto" style="vertical-align: inherit;"><font dir="auto" style="vertical-align: inherit;">, +100, cualquier orden). El primer choque borra la puntuación a </font></font><code>0</code><font dir="auto" style="vertical-align: inherit;"><font dir="auto" style="vertical-align: inherit;">; los siguientes son
+       </font></font><strong><font dir="auto" style="vertical-align: inherit;"><font dir="auto" style="vertical-align: inherit;">-500</font></font></strong><font dir="auto" style="vertical-align: inherit;"><font dir="auto" style="vertical-align: inherit;"> . Las partidas duran 400 movimientos en lugar de 300.</font></font></li>
+  <li><strong><font dir="auto" style="vertical-align: inherit;"><font dir="auto" style="vertical-align: inherit;">v6 — 30 Sep 2026:</font></font></strong><font dir="auto" style="vertical-align: inherit;"><font dir="auto" style="vertical-align: inherit;"> cada dígito ordenado aparece en varias copias (3–5) en lugar de una; al comer el dígito objetivo se eliminan todas sus copias y se avanza, por lo que la secuencia no puede ser monopolizada.</font></font></li>
+  <li><strong><font dir="auto" style="vertical-align: inherit;"><font dir="auto" style="vertical-align: inherit;">v5 — 23 de septiembre de 2026:</font></font></strong><font dir="auto" style="vertical-align: inherit;"><font dir="auto" style="vertical-align: inherit;"> aparece una </font></font><code>#</code><font dir="auto" style="vertical-align: inherit;"><font dir="auto" style="vertical-align: inherit;">pared en el tablero (una línea recta de hasta 11 casillas de largo) que se estrecha hacia su centro en cada ronda; chocar contra ella supone una penalización </font></font><strong><font dir="auto" style="vertical-align: inherit;"><font dir="auto" style="vertical-align: inherit;">de -500</font></font></strong><font dir="auto" style="vertical-align: inherit;"><font dir="auto" style="vertical-align: inherit;"> y tu serpiente se queda en su sitio.</font></font></li>
+  <li><strong><font dir="auto" style="vertical-align: inherit;"><font dir="auto" style="vertical-align: inherit;">v4 — 16 de septiembre de 2026:</font></font></strong> <code>X</code><font dir="auto" style="vertical-align: inherit;"><font dir="auto" style="vertical-align: inherit;"> aparecen recogidas en el tablero: comer una otorga </font></font><strong><font dir="auto" style="vertical-align: inherit;"><font dir="auto" style="vertical-align: inherit;">+50</font></font></strong><font dir="auto" style="vertical-align: inherit;"><font dir="auto" style="vertical-align: inherit;"> puntos y acumula un multiplicador de puntuación permanente ( </font></font><code>x2</code><font dir="auto" style="vertical-align: inherit;"><font dir="auto" style="vertical-align: inherit;">, </font></font><code>x3</code><font dir="auto" style="vertical-align: inherit;"><font dir="auto" style="vertical-align: inherit;">, …) que multiplica tus puntos de comida; </font></font><code>turn_data</code><font dir="auto" style="vertical-align: inherit;"><font dir="auto" style="vertical-align: inherit;">obtiene </font></font><code>multiplier_1/2</code><font dir="auto" style="vertical-align: inherit;"><font dir="auto" style="vertical-align: inherit;">.</font></font></li>
+  <li><strong><font dir="auto" style="vertical-align: inherit;"><font dir="auto" style="vertical-align: inherit;">v3 — 9 Sep 2026:</font></font></strong><font dir="auto" style="vertical-align: inherit;"><font dir="auto" style="vertical-align: inherit;"> la comida se convierte en números en lugar de
+       </font></font><code>*</code><font dir="auto" style="vertical-align: inherit;"><font dir="auto" style="vertical-align: inherit;">: come cinco dígitos a bordo ( </font></font><code>1</code><font dir="auto" style="vertical-align: inherit;"><font dir="auto" style="vertical-align: inherit;">– </font></font><code>9</code><font dir="auto" style="vertical-align: inherit;"><font dir="auto" style="vertical-align: inherit;">) en orden cíclico ascendente; el dígito correcto obtiene </font></font><em><font dir="auto" style="vertical-align: inherit;"><font dir="auto" style="vertical-align: inherit;">dígito × 100</font></font></em><font dir="auto" style="vertical-align: inherit;"><font dir="auto" style="vertical-align: inherit;"> , uno incorrecto es una penalización </font></font><strong><font dir="auto" style="vertical-align: inherit;"><font dir="auto" style="vertical-align: inherit;">de -500</font></font></strong><font dir="auto" style="vertical-align: inherit;"><font dir="auto" style="vertical-align: inherit;"> .</font></font></li>
+  <li><strong><font dir="auto" style="vertical-align: inherit;"><font dir="auto" style="vertical-align: inherit;">v2 — 2 de septiembre de 2026:</font></font></strong><font dir="auto" style="vertical-align: inherit;"><font dir="auto" style="vertical-align: inherit;"> el tamaño del tablero varía según la partida (cada dimensión es aleatoria entre 12 y 20, no necesariamente cuadrada) y
+       </font></font><code>your_turn</code><font dir="auto" style="vertical-align: inherit;"><font dir="auto" style="vertical-align: inherit;">se añade un </font></font><code>board_size</code><font dir="auto" style="vertical-align: inherit;"><font dir="auto" style="vertical-align: inherit;">campo ( </font></font><code>"rows x cols"</code><font dir="auto" style="vertical-align: inherit;"><font dir="auto" style="vertical-align: inherit;">).</font></font></li>
+  <li><strong><font dir="auto" style="vertical-align: inherit;"><font dir="auto" style="vertical-align: inherit;">v1:</font></font></strong><font dir="auto" style="vertical-align: inherit;"><font dir="auto" style="vertical-align: inherit;"> tablero fijo de 15×15.</font></font></li>
+</ul>
+<p><font dir="auto" style="vertical-align: inherit;"><font dir="auto" style="vertical-align: inherit;">Al final de esta página encontrará ejemplos visuales de cada regla.</font></font></p>
+
+<h2><font dir="auto" style="vertical-align: inherit;"><font dir="auto" style="vertical-align: inherit;">Ejemplos visuales</font></font></h2>
+<p><font dir="auto" style="vertical-align: inherit;"><font dir="auto" style="vertical-align: inherit;">Un ejemplo por regla. Los colores son solo para esta página: tu bot recibe la </font></font><code>board</code><font dir="auto" style="vertical-align: inherit;"><font dir="auto" style="vertical-align: inherit;">cadena sin formato. Por ejemplo, el primer tablero que aparece a continuación llega como:</font></font></p>
+<pre><font dir="auto" style="vertical-align: inherit;"><font dir="auto" style="vertical-align: inherit;">| |</font></font><font></font><font dir="auto" style="vertical-align: inherit;"><font dir="auto" style="vertical-align: inherit;">
+| aaA* |</font></font><font></font><font dir="auto" style="vertical-align: inherit;"><font dir="auto" style="vertical-align: inherit;">
+| |</font></font><font></font><font dir="auto" style="vertical-align: inherit;"><font dir="auto" style="vertical-align: inherit;">
+| |</font></font><font></font><font dir="auto" style="vertical-align: inherit;"><font dir="auto" style="vertical-align: inherit;">
+| * |</font></font><font></font><font dir="auto" style="vertical-align: inherit;"><font dir="auto" style="vertical-align: inherit;">
+| Bbb |</font></font><font></font><font dir="auto" style="vertical-align: inherit;"><font dir="auto" style="vertical-align: inherit;">
+| * |</font></font></pre>
+<div class="legend">
+  <span><div class="board" style="grid-template-columns:repeat(1,20px)"><span class="ha"><font dir="auto" style="vertical-align: inherit;"><font dir="auto" style="vertical-align: inherit;">A</font></font></span></div><font dir="auto" style="vertical-align: inherit;"><font dir="auto" style="vertical-align: inherit;">tu cabeza</font></font></span>
+  <span><div class="board" style="grid-template-columns:repeat(1,20px)"><span class="ba"><font dir="auto" style="vertical-align: inherit;"><font dir="auto" style="vertical-align: inherit;">a</font></font></span></div><font dir="auto" style="vertical-align: inherit;"><font dir="auto" style="vertical-align: inherit;">tu cuerpo</font></font></span>
+  <span><div class="board" style="grid-template-columns:repeat(1,20px)"><span class="hb"><font dir="auto" style="vertical-align: inherit;"><font dir="auto" style="vertical-align: inherit;">B</font></font></span></div><font dir="auto" style="vertical-align: inherit;"><font dir="auto" style="vertical-align: inherit;">adversario</font></font></span>
+  <span><div class="board" style="grid-template-columns:repeat(1,20px)"><span class="fd"><font dir="auto" style="vertical-align: inherit;"><font dir="auto" style="vertical-align: inherit;">*</font></font></span></div><font dir="auto" style="vertical-align: inherit;"><font dir="auto" style="vertical-align: inherit;">alimento</font></font></span>
+  <span><div class="board" style="grid-template-columns:repeat(1,20px)"><span class="ta"><font dir="auto" style="vertical-align: inherit;"><font dir="auto" style="vertical-align: inherit;">Ⓐ</font></font></span></div><font dir="auto" style="vertical-align: inherit;"><font dir="auto" style="vertical-align: inherit;">Solo come comida de cola A</font></font></span>
+  <span><div class="board" style="grid-template-columns:repeat(1,20px)"><span class="tb"><font dir="auto" style="vertical-align: inherit;"><font dir="auto" style="vertical-align: inherit;">Ⓑ</font></font></span></div><font dir="auto" style="vertical-align: inherit;"><font dir="auto" style="vertical-align: inherit;">Solo B come</font></font></span>
+  <span><div class="board" style="grid-template-columns:repeat(1,20px)"><span class="mx"><font dir="auto" style="vertical-align: inherit;"><font dir="auto" style="vertical-align: inherit;">incógnita</font></font></span></div><font dir="auto" style="vertical-align: inherit;"><font dir="auto" style="vertical-align: inherit;">multiplicador</font></font></span>
+  <span><div class="board" style="grid-template-columns:repeat(1,20px)"><span class="wl"><font dir="auto" style="vertical-align: inherit;"><font dir="auto" style="vertical-align: inherit;">#</font></font></span></div><font dir="auto" style="vertical-align: inherit;"><font dir="auto" style="vertical-align: inherit;">muro</font></font></span>
+<span><div class="board" style="grid-template-columns:repeat(1,20px)"><span class="bk"><font dir="auto" style="vertical-align: inherit;"><font dir="auto" style="vertical-align: inherit;">💣</font></font></span></div><font dir="auto" style="vertical-align: inherit;"><font dir="auto" style="vertical-align: inherit;">bomba grande</font></font></span>
+  <span><div class="board" style="grid-template-columns:repeat(1,20px)"><span class="bk"><font dir="auto" style="vertical-align: inherit;"><font dir="auto" style="vertical-align: inherit;">🧨</font></font></span></div><font dir="auto" style="vertical-align: inherit;"><font dir="auto" style="vertical-align: inherit;">bomba pequeña</font></font></span>
+  <span><span class="board" style="grid-template-columns:20px"><span class="zone">
+  </span></span><font dir="auto" style="vertical-align: inherit;"><font dir="auto" style="vertical-align: inherit;">zona de explosión</font></font></span>
+<span><div class="board" style="grid-template-columns:repeat(1,20px)"><span class="st"><font dir="auto" style="vertical-align: inherit;"><font dir="auto" style="vertical-align: inherit;">⭐</font></font></span></div><font dir="auto" style="vertical-align: inherit;"><font dir="auto" style="vertical-align: inherit;">estrella</font></font></span>
+  <span><div class="board" style="grid-template-columns:repeat(2,20px)"><span class="ha inv"><font dir="auto" style="vertical-align: inherit;"><font dir="auto" style="vertical-align: inherit;">a</font></font></span><span class="ba inv"><font dir="auto" style="vertical-align: inherit;"><font dir="auto" style="vertical-align: inherit;">A</font></font></span></div> invincible (head <code>a</code>)</span>
+  <span><span class="board" style="grid-template-columns:20px"><span class="good"></span></span> right move</span>
+  <span><span class="board" style="grid-template-columns:20px"><span class="bad"></span></span> crash / penalty</span>
+</div>
+<p>In every sequence <code>A</code> plays; the opponent's moves in between are
+left out unless they matter.</p>
+
+<div class="ex"><h3>Basics: eat to grow</h3><p><code>A</code> moves <code>right</code> onto the <code>*</code>.</p><div class="ex-row"><figure class="ex-panel"><div class="board" style="grid-template-columns:repeat(11,20px)"><span></span><span></span><span></span><span></span><span></span><span></span><span></span><span></span><span></span><span></span><span></span><span></span><span class="ba">a</span><span class="ba">a</span><span class="ha">A</span><span class="fd good">*</span><span></span><span></span><span></span><span></span><span></span><span></span><span></span><span></span><span></span><span></span><span></span><span></span><span></span><span></span><span></span><span></span><span></span><span></span><span></span><span></span><span></span><span></span><span></span><span></span><span></span><span></span><span></span><span></span><span></span><span></span><span></span><span></span><span></span><span></span><span></span><span class="fd">*</span><span></span><span></span><span></span><span></span><span></span><span></span><span></span><span></span><span class="hb">B</span><span class="bb">b</span><span class="bb">b</span><span></span><span></span><span></span><span></span><span></span><span class="fd">*</span><span></span><span></span><span></span><span></span><span></span><span></span><span></span><span></span></div><figcaption>Before: the food is right in front of the head.</figcaption></figure><span class="ex-arrow">→</span><figure class="ex-panel"><div class="board" style="grid-template-columns:repeat(11,20px)"><span></span><span></span><span></span><span></span><span></span><span></span><span></span><span></span><span></span><span></span><span></span><span></span><span class="ba">a</span><span class="ba">a</span><span class="ba">a</span><span class="ha">A</span><span></span><span></span><span></span><span></span><span></span><span></span><span></span><span></span><span></span><span></span><span></span><span></span><span></span><span></span><span></span><span></span><span></span><span></span><span></span><span></span><span></span><span></span><span></span><span></span><span></span><span class="fd">*</span><span></span><span></span><span></span><span></span><span></span><span></span><span></span><span></span><span></span><span class="fd">*</span><span></span><span></span><span></span><span></span><span></span><span></span><span></span><span></span><span class="hb">B</span><span class="bb">b</span><span class="bb">b</span><span></span><span></span><span></span><span></span><span></span><span class="fd">*</span><span></span><span></span><span></span><span></span><span></span><span></span><span></span><span></span></div><figcaption>After: <strong>+100</strong>, the snake is one cell longer and a new <code>*</code> appeared elsewhere.</figcaption></figure></div><p>Any other move that doesn’t crash is <strong>+1</strong>.</p></div>
+
+<div class="ex"><h3>v2 — Variable board size (2 Sep 2026)</h3><p>Each match gets its own size, each side between 12 and 20 (20 and 30 from v8). This one is 12 rows × 16 columns: <code>rows: 12</code>, <code>cols: 16</code>, <code>board_size: "12x16"</code>.</p><div class="ex-row"><figure class="ex-panel"><div class="board" style="grid-template-columns:repeat(16,20px)"><span></span><span></span><span></span><span></span><span></span><span></span><span></span><span></span><span></span><span></span><span></span><span></span><span></span><span></span><span></span><span></span><span class="ba">a</span><span class="ba">a</span><span class="ha">A</span><span></span><span></span><span></span><span></span><span></span><span></span><span></span><span></span><span></span><span></span><span></span><span></span><span></span><span></span><span></span><span></span><span></span><span></span><span></span><span></span><span></span><span></span><span></span><span></span><span></span><span></span><span></span><span></span><span></span><span></span><span></span><span></span><span></span><span></span><span></span><span></span><span></span><span></span><span></span><span class="fd">*</span><span></span><span></span><span></span><span></span><span></span><span></span><span></span><span></span><span></span><span></span><span></span><span></span><span></span><span></span><span></span><span></span><span></span><span></span><span></span><span></span><span></span><span></span><span></span><span></span><span></span><span></span><span></span><span></span><span></span><span></span><span></span><span></span><span></span><span></span><span></span><span></span><span></span><span></span><span></span><span></span><span></span><span class="fd">*</span><span></span><span></span><span></span><span></span><span></span><span></span><span></span><span></span><span></span><span></span><span></span><span></span><span></span><span></span><span></span><span></span><span></span><span></span><span></span><span></span><span></span><span></span><span></span><span></span><span></span><span></span><span></span><span></span><span></span><span></span><span></span><span></span><span></span><span></span><span></span><span></span><span></span><span></span><span></span><span></span><span></span><span></span><span></span><span></span><span></span><span></span><span></span><span></span><span></span><span></span><span></span><span></span><span></span><span></span><span></span><span></span><span class="fd">*</span><span></span><span></span><span></span><span></span><span></span><span></span><span></span><span></span><span></span><span></span><span></span><span></span><span></span><span></span><span></span><span class="hb">B</span><span class="bb">b</span><span class="bb">b</span><span></span><span></span><span></span><span></span><span></span><span></span><span></span><span></span><span></span><span></span><span></span><span></span><span></span><span></span><span></span><span></span></div><figcaption>Starting position on a 12×16 board. The next match could be 19×13.</figcaption></figure></div></div>
+
+<div class="ex"><h3>v3 — Ordered numeric food (9 Sep 2026)</h3><p>The board holds <code>1 6 7 8 9</code> (1–5 were already eaten). The target is <code>6</code>: its predecessor <code>5</code> is not on the board. <code>1</code> is <em>not</em> the target: its predecessor <code>9</code> is still there.</p><div class="ex-row"><figure class="ex-panel"><div class="board" style="grid-template-columns:repeat(11,20px)"><span></span><span></span><span></span><span></span><span></span><span></span><span></span><span></span><span></span><span></span><span></span><span></span><span></span><span class="fd bad">1</span><span></span><span></span><span></span><span></span><span></span><span class="fd">8</span><span></span><span></span><span></span><span></span><span></span><span></span><span></span><span></span><span></span><span></span><span></span><span></span><span></span><span></span><span class="ba">a</span><span class="ba">a</span><span class="ha">A</span><span></span><span></span><span class="fd good">6</span><span></span><span></span><span></span><span></span><span></span><span></span><span></span><span></span><span></span><span></span><span></span><span></span><span class="fd">9</span><span></span><span></span><span></span><span></span><span class="fd">7</span><span></span><span></span><span></span><span class="hb">B</span><span class="bb">b</span><span class="bb">b</span><span></span><span></span><span></span><span></span><span></span><span></span><span></span><span></span><span></span><span></span><span></span><span></span><span></span></div><figcaption>Green: the right digit (<code>6</code>). Red: the trap (<code>1</code>, −500).</figcaption></figure><span class="ex-arrow">→</span><figure class="ex-panel"><div class="board" style="grid-template-columns:repeat(11,20px)"><span></span><span></span><span></span><span></span><span></span><span></span><span></span><span></span><span></span><span></span><span></span><span></span><span></span><span class="fd">1</span><span></span><span></span><span></span><span></span><span></span><span class="fd">8</span><span></span><span></span><span></span><span></span><span></span><span></span><span></span><span></span><span></span><span></span><span></span><span></span><span></span><span></span><span></span><span></span><span class="ba">a</span><span class="ba">a</span><span class="ba">a</span><span class="ha">A</span><span></span><span></span><span></span><span></span><span></span><span></span><span></span><span></span><span></span><span></span><span></span><span></span><span class="fd">9</span><span></span><span></span><span></span><span></span><span class="fd">7</span><span></span><span></span><span></span><span class="hb">B</span><span class="bb">b</span><span class="bb">b</span><span></span><span></span><span></span><span></span><span></span><span></span><span></span><span></span><span></span><span></span><span></span><span class="fd">2</span><span></span></div><figcaption>After eating the <code>6</code>: <strong>+600</strong>, grew one cell, and <code>2</code> joins the window (<code>7 8 9 1 2</code>; next target <code>7</code>).</figcaption></figure></div></div>
+
+<div class="ex"><h3>v4 — Multipliers (16 Sep 2026)</h3><p><code>A</code> takes the <code>X</code> in front of it.</p><div class="ex-row"><figure class="ex-panel"><div class="board" style="grid-template-columns:repeat(11,20px)"><span></span><span class="fd">6</span><span></span><span></span><span></span><span></span><span></span><span></span><span></span><span></span><span></span><span></span><span class="ba">a</span><span class="ba">a</span><span class="ha">A</span><span class="mx good">X</span><span></span><span></span><span></span><span class="fd">3</span><span></span><span></span><span></span><span></span><span></span><span></span><span></span><span class="fd">5</span><span></span><span></span><span></span><span></span><span></span><span></span><span></span><span></span><span></span><span></span><span></span><span class="mx">X</span><span></span><span></span><span></span><span></span><span></span><span></span><span class="fd">2</span><span></span><span></span><span></span><span></span><span></span><span></span><span></span><span></span><span></span><span></span><span></span><span></span><span></span><span class="hb">B</span><span class="bb">b</span><span class="bb">b</span><span></span><span></span><span></span><span></span><span></span><span></span><span></span><span></span><span></span><span></span><span></span><span></span><span class="fd">4</span><span></span></div><figcaption><code>multiplier_1: 1</code></figcaption></figure><span class="ex-arrow">→</span><figure class="ex-panel"><div class="board" style="grid-template-columns:repeat(11,20px)"><span></span><span class="fd">6</span><span></span><span></span><span></span><span></span><span></span><span></span><span></span><span></span><span></span><span></span><span></span><span class="ba">a</span><span class="ba">a</span><span class="ha">A</span><span></span><span></span><span></span><span class="fd">3</span><span></span><span></span><span></span><span></span><span></span><span></span><span></span><span class="fd">5</span><span></span><span></span><span></span><span></span><span></span><span></span><span></span><span></span><span></span><span></span><span></span><span class="mx">X</span><span></span><span></span><span></span><span></span><span></span><span></span><span class="fd">2</span><span></span><span></span><span></span><span></span><span></span><span></span><span></span><span></span><span></span><span class="mx">X</span><span></span><span></span><span></span><span class="hb">B</span><span class="bb">b</span><span class="bb">b</span><span></span><span></span><span></span><span></span><span></span><span></span><span></span><span></span><span></span><span></span><span></span><span></span><span class="fd">4</span><span></span></div><figcaption><strong>+50</strong>, <code>multiplier_1: 2</code>. The snake doesn’t grow; a new <code>X</code> appears.</figcaption></figure></div><p>From now on eating the <code>2</code> scores 2 × 100 × 2 = <strong>400</strong>. A second <code>X</code> would make it ×3.</p></div>
+
+<div class="ex"><h3>v5 — Shrinking walls (23 Sep 2026)</h3><p><code>A</code> moves <code>down</code> into the <code>#</code>.</p><div class="ex-row"><figure class="ex-panel"><div class="board" style="grid-template-columns:repeat(11,20px)"><span></span><span></span><span></span><span></span><span></span><span></span><span></span><span></span><span></span><span></span><span></span><span></span><span></span><span></span><span></span><span></span><span></span><span></span><span></span><span></span><span></span><span></span><span></span><span></span><span></span><span class="ba">a</span><span class="ba">a</span><span class="ha">A</span><span></span><span></span><span></span><span></span><span></span><span></span><span></span><span class="wl">#</span><span class="wl">#</span><span class="wl">#</span><span class="wl bad">#</span><span class="wl">#</span><span class="wl">#</span><span class="wl">#</span><span></span><span></span><span></span><span></span><span></span><span></span><span></span><span></span><span></span><span></span><span></span><span></span><span></span><span></span><span></span><span></span><span></span><span></span><span class="hb">B</span><span class="bb">b</span><span class="bb">b</span><span></span><span></span><span></span><span></span><span></span><span></span><span></span><span></span><span></span><span></span><span></span><span></span><span></span><span></span></div><figcaption>Round 1: the move hits the wall: <strong>−500</strong> and <code>A</code> stays put. The game continues.</figcaption></figure><span class="ex-arrow">→</span><figure class="ex-panel"><div class="board" style="grid-template-columns:repeat(11,20px)"><span></span><span></span><span></span><span></span><span></span><span></span><span></span><span></span><span></span><span></span><span></span><span></span><span></span><span></span><span></span><span></span><span></span><span></span><span></span><span></span><span></span><span></span><span></span><span></span><span></span><span class="ba">a</span><span class="ba">a</span><span class="ha">A</span><span></span><span></span><span></span><span></span><span></span><span></span><span></span><span></span><span class="wl">#</span><span class="wl">#</span><span class="wl">#</span><span class="wl">#</span><span class="wl">#</span><span></span><span></span><span></span><span></span><span></span><span></span><span></span><span></span><span></span><span></span><span></span><span></span><span></span><span></span><span></span><span></span><span></span><span></span><span class="hb">B</span><span class="bb">b</span><span class="bb">b</span><span></span><span></span><span></span><span></span><span></span><span></span><span></span><span></span><span></span><span></span><span></span><span></span><span></span><span></span><span></span></div><figcaption>Round 2: the wall shrank toward its centre, 7 → 5.</figcaption></figure><span class="ex-arrow">→</span><figure class="ex-panel"><div class="board" style="grid-template-columns:repeat(11,20px)"><span></span><span></span><span></span><span></span><span></span><span></span><span></span><span></span><span></span><span></span><span></span><span></span><span></span><span></span><span></span><span></span><span></span><span></span><span></span><span></span><span></span><span></span><span></span><span></span><span></span><span></span><span class="ba">a</span><span class="ba">a</span><span class="ha">A</span><span></span><span></span><span></span><span></span><span></span><span></span><span></span><span></span><span class="wl">#</span><span class="wl">#</span><span class="wl">#</span><span></span><span></span><span></span><span></span><span></span><span></span><span></span><span></span><span></span><span></span><span></span><span></span><span></span><span></span><span></span><span></span><span></span><span></span><span class="hb">B</span><span class="bb">b</span><span class="bb">b</span><span></span><span></span><span></span><span></span><span></span><span></span><span></span><span></span><span></span><span></span><span></span><span></span><span></span><span></span><span></span><span></span></div><figcaption>Round 3: 5 → 3. Then 1, then it’s gone and a new wall appears elsewhere.</figcaption></figure></div></div>
+
+<div class="ex"><h3>v6 — Several copies per digit (30 Sep 2026)</h3><p>Each window digit (<code>2 3 4 5 6</code>) appears 3–5 times. <code>A</code> eats one <code>2</code>.</p><div class="ex-row"><figure class="ex-panel"><div class="board" style="grid-template-columns:repeat(12,20px)"><span></span><span></span><span class="fd good">2</span><span></span><span></span><span></span><span></span><span></span><span class="fd">5</span><span></span><span></span><span></span><span></span><span class="ba">a</span><span class="ba">a</span><span class="ha">A</span><span class="fd good">2</span><span></span><span></span><span></span><span class="fd">3</span><span></span><span></span><span></span><span></span><span></span><span></span><span></span><span class="fd">6</span><span></span><span></span><span></span><span></span><span></span><span class="fd">4</span><span></span><span></span><span class="fd">3</span><span></span><span></span><span></span><span></span><span></span><span></span><span class="fd good">2</span><span></span><span></span><span></span><span></span><span></span><span></span><span></span><span></span><span></span><span class="fd">4</span><span></span><span></span><span></span><span class="fd">6</span><span></span><span></span><span></span><span class="fd">5</span><span></span><span></span><span></span><span></span><span></span><span></span><span class="fd">3</span><span></span><span></span><span></span><span class="fd">6</span><span></span><span></span><span></span><span class="hb">B</span><span class="bb">b</span><span class="bb">b</span><span></span><span></span><span class="fd">4</span><span></span><span></span><span></span><span></span><span class="fd">5</span><span></span><span></span><span></span><span></span><span></span><span></span><span></span><span></span></div><figcaption>Three <code>2</code>s on the board; any of them is the target.</figcaption></figure><span class="ex-arrow">→</span><figure class="ex-panel"><div class="board" style="grid-template-columns:repeat(12,20px)"><span></span><span></span><span></span><span></span><span></span><span class="fd">7</span><span></span><span></span><span class="fd">5</span><span></span><span></span><span></span><span></span><span class="ba">a</span><span class="ba">a</span><span class="ba">a</span><span class="ha">A</span><span></span><span></span><span></span><span class="fd">3</span><span></span><span></span><span></span><span></span><span></span><span></span><span></span><span class="fd">6</span><span></span><span></span><span></span><span></span><span></span><span class="fd">4</span><span></span><span></span><span class="fd">3</span><span></span><span></span><span></span><span></span><span></span><span></span><span></span><span></span><span class="fd">7</span><span></span><span></span><span></span><span></span><span></span><span></span><span></span><span class="fd">4</span><span></span><span></span><span></span><span class="fd">6</span><span></span><span></span><span></span><span class="fd">5</span><span></span><span></span><span></span><span></span><span></span><span></span><span class="fd">3</span><span></span><span></span><span></span><span class="fd">6</span><span></span><span></span><span></span><span class="hb">B</span><span class="bb">b</span><span class="bb">b</span><span></span><span></span><span class="fd">4</span><span></span><span></span><span></span><span></span><span class="fd">5</span><span></span><span></span><span></span><span></span><span class="fd">7</span><span></span><span></span><span></span></div><figcaption><strong>+200</strong> once. <em>All</em> the <code>2</code>s are gone and the next digit, <code>7</code>, appears in its own copies.</figcaption></figure></div></div>
+
+<div class="ex"><h3>v7 — Crashes: the tail becomes food (7 Oct 2026)</h3><p><code>A</code> (9 cells, <code>score_1: 1200</code>, no crash yet) moves <code>down</code> into its own body. Crashing into the board edge, a <code>#</code> or <code>B</code> works the same way.</p><div class="ex-row"><figure class="ex-panel"><div class="board" style="grid-template-columns:repeat(11,20px)"><span></span><span></span><span></span><span></span><span></span><span></span><span></span><span></span><span></span><span></span><span></span><span></span><span></span><span></span><span></span><span></span><span></span><span></span><span></span><span></span><span></span><span></span><span></span><span></span><span></span><span class="ha">A</span><span class="ba">a</span><span class="ba">a</span><span></span><span></span><span></span><span></span><span></span><span></span><span></span><span class="ba">a</span><span class="ba bad">a</span><span></span><span class="ba">a</span><span></span><span></span><span></span><span></span><span></span><span></span><span></span><span></span><span class="ba">a</span><span class="ba">a</span><span class="ba">a</span><span></span><span></span><span></span><span></span><span></span><span></span><span></span><span></span><span></span><span></span><span class="hb">B</span><span class="bb">b</span><span class="bb">b</span><span></span><span></span><span></span><span></span><span></span><span></span><span></span><span></span><span></span><span></span><span></span><span></span><span></span><span></span></div><figcaption>The move hits its own body.</figcaption></figure><span class="ex-arrow">→</span><figure class="ex-panel"><div class="board" style="grid-template-columns:repeat(11,20px)"><span></span><span></span><span></span><span></span><span></span><span></span><span></span><span></span><span></span><span></span><span></span><span></span><span></span><span></span><span></span><span></span><span></span><span></span><span></span><span></span><span></span><span></span><span></span><span></span><span></span><span class="ha">A</span><span class="ba">a</span><span class="ba">a</span><span></span><span></span><span></span><span></span><span></span><span></span><span></span><span class="tb">Ⓑ</span><span class="tb">Ⓑ</span><span></span><span class="tb">Ⓑ</span><span></span><span></span><span></span><span></span><span></span><span></span><span></span><span></span><span class="tb">Ⓑ</span><span class="tb">Ⓑ</span><span class="tb">Ⓑ</span><span></span><span></span><span></span><span></span><span></span><span></span><span></span><span></span><span></span><span></span><span class="hb">B</span><span class="bb">b</span><span class="bb">b</span><span></span><span></span><span></span><span></span><span></span><span></span><span></span><span></span><span></span><span></span><span></span><span></span><span></span><span></span></div><figcaption>The game goes on. <code>A</code> stays put and keeps 3 cells; the other 6 become <code>Ⓑ</code>: food only <code>B</code> can eat. First crash: <code>score_1</code> 1200 → <strong>0</strong>.</figcaption></figure><span class="ex-arrow">→</span><figure class="ex-panel"><div class="board" style="grid-template-columns:repeat(11,20px)"><span></span><span></span><span></span><span></span><span></span><span></span><span></span><span></span><span></span><span></span><span></span><span></span><span></span><span></span><span></span><span></span><span></span><span></span><span></span><span></span><span></span><span></span><span></span><span></span><span></span><span class="ha">A</span><span class="ba">a</span><span class="ba">a</span><span></span><span></span><span></span><span></span><span></span><span></span><span></span><span class="tb">Ⓑ</span><span class="tb">Ⓑ</span><span></span><span class="tb">Ⓑ</span><span></span><span></span><span></span><span></span><span></span><span></span><span></span><span></span><span class="tb">Ⓑ</span><span class="tb">Ⓑ</span><span class="hb good">B</span><span></span><span></span><span></span><span></span><span></span><span></span><span></span><span></span><span></span><span></span><span class="bb">b</span><span class="bb">b</span><span class="bb">b</span><span></span><span></span><span></span><span></span><span></span><span></span><span></span><span></span><span></span><span></span><span></span><span></span><span></span><span></span></div><figcaption><code>B</code> moves <code>up</code> onto a <code>Ⓑ</code>: <strong>+100</strong> (× multiplier) and grows. It can eat the rest in any order.</figcaption></figure></div><p>If <code>A</code> steps on a <code>Ⓑ</code> it just clears it (no points, no growth) — a way to deny it to <code>B</code>. Your own crash never feeds you.</p></div>
+
+<div class="ex"><h3>v7 — Crashes: only the first one wipes the score</h3><p><code>A</code> has <code>score_1: 1200</code> and moves <code>down</code> into the <code>#</code>. With only 3 cells it has no tail to lose.</p><div class="ex-row"><figure class="ex-panel"><div class="board" style="grid-template-columns:repeat(11,20px)"><span></span><span></span><span></span><span></span><span></span><span></span><span></span><span></span><span></span><span></span><span></span><span></span><span></span><span></span><span></span><span></span><span></span><span></span><span></span><span></span><span></span><span></span><span></span><span></span><span></span><span class="ba">a</span><span class="ba">a</span><span class="ha">A</span><span></span><span></span><span></span><span></span><span></span><span></span><span></span><span class="wl">#</span><span class="wl">#</span><span class="wl">#</span><span class="wl bad">#</span><span class="wl">#</span><span class="wl">#</span><span class="wl">#</span><span></span><span></span><span></span><span></span><span></span><span></span><span></span><span></span><span></span><span></span><span></span><span></span><span></span><span></span><span></span><span></span><span></span><span></span><span class="hb">B</span><span class="bb">b</span><span class="bb">b</span><span></span><span></span><span></span><span></span><span></span><span></span><span></span><span></span><span></span><span></span><span></span><span></span><span></span><span></span></div><figcaption>First crash: <code>score_1</code> 1200 → <strong>0</strong> (not 700). <code>A</code> stays put.</figcaption></figure><span class="ex-arrow">→</span><figure class="ex-panel"><div class="board" style="grid-template-columns:repeat(11,20px)"><span></span><span></span><span></span><span></span><span></span><span></span><span></span><span></span><span></span><span></span><span></span><span></span><span></span><span></span><span></span><span></span><span></span><span></span><span></span><span></span><span></span><span></span><span></span><span></span><span></span><span class="ba">a</span><span class="ba">a</span><span class="ha">A</span><span></span><span></span><span></span><span></span><span></span><span></span><span></span><span></span><span class="wl">#</span><span class="wl">#</span><span class="wl bad">#</span><span class="wl">#</span><span class="wl">#</span><span></span><span></span><span></span><span></span><span></span><span></span><span></span><span></span><span></span><span></span><span></span><span></span><span></span><span></span><span></span><span></span><span></span><span></span><span class="hb">B</span><span class="bb">b</span><span class="bb">b</span><span></span><span></span><span></span><span></span><span></span><span></span><span></span><span></span><span></span><span></span><span></span><span></span><span></span><span></span><span></span></div><figcaption>Later <code>A</code> has 400 and crashes again: the usual <strong>−500</strong> (400 → −100).</figcaption></figure></div><p>With a score of 0 or less at the first crash, the usual −500 applies (crashing never clears a negative score). Below −2500 the game ends and you lose.</p></div>
+
+
+<div class="ex"><h3>v8 — Proximity bombs: reach (14 Oct 2026)</h3><p>A bomb explodes when a head ends its move inside the shaded zone. Diagonals count as one cell.</p><div class="ex-row"><figure class="ex-panel"><div class="board" style="grid-template-columns:repeat(7,20px)"><span></span><span></span><span></span><span></span><span></span><span></span><span></span><span></span><span class="zone"></span><span class="zone"></span><span class="zone"></span><span class="zone"></span><span class="zone"></span><span></span><span></span><span class="zone"></span><span class="zone"></span><span class="zone"></span><span class="zone"></span><span class="zone"></span><span></span><span></span><span class="zone"></span><span class="zone"></span><span class="bk">💣</span><span class="zone"></span><span class="zone"></span><span></span><span></span><span class="zone"></span><span class="zone"></span><span class="zone"></span><span class="zone"></span><span class="zone"></span><span></span><span></span><span class="zone"></span><span class="zone"></span><span class="zone"></span><span class="zone"></span><span class="zone"></span><span></span><span></span><span></span><span></span><span></span><span></span><span></span><span></span></div><figcaption><code>💣</code>: 2 cells or closer (5×5).</figcaption></figure><figure class="ex-panel"><div class="board" style="grid-template-columns:repeat(5,20px)"><span></span><span></span><span></span><span></span><span></span><span></span><span class="zone"></span><span class="zone"></span><span class="zone"></span><span></span><span></span><span class="zone"></span><span class="bk">🧨</span><span class="zone"></span><span></span><span></span><span class="zone"></span><span class="zone"></span><span class="zone"></span><span></span><span></span><span></span><span></span><span></span><span></span></div><figcaption><code>🧨</code>: 1 cell or closer (3×3).</figcaption></figure></div></div>
+
+<div class="ex"><h3>v8 — Proximity bombs: explosion</h3><p><code>A</code> moves <code>right</code>, into the <code>💣</code>’s zone (2 cells away). It never touches the bomb.</p><div class="ex-row"><figure class="ex-panel"><div class="board" style="grid-template-columns:repeat(12,20px)"><span></span><span></span><span></span><span></span><span></span><span></span><span class="zone"></span><span class="zone"></span><span class="zone"></span><span class="zone"></span><span class="zone"></span><span></span><span></span><span></span><span></span><span></span><span></span><span></span><span class="zone"></span><span class="zone"></span><span class="zone"></span><span class="zone"></span><span class="zone"></span><span></span><span></span><span></span><span></span><span class="ba">a</span><span class="ba">a</span><span class="ha">A</span><span class="zone go"></span><span class="zone"></span><span class="bk">💣</span><span class="zone"></span><span class="zone"></span><span></span><span></span><span></span><span></span><span></span><span></span><span></span><span class="zone"></span><span class="zone"></span><span class="zone"></span><span class="zone"></span><span class="zone"></span><span></span><span class="fd">3</span><span class="zone"></span><span class="zone"></span><span class="zone"></span><span></span><span></span><span class="zone"></span><span class="zone"></span><span class="zone"></span><span class="zone"></span><span class="zone"></span><span></span><span></span><span class="zone"></span><span class="bk">🧨</span><span class="zone"></span><span></span><span></span><span></span><span></span><span class="zone"></span><span class="zone"></span><span class="zone"></span><span></span><span></span><span class="zone"></span><span class="zone"></span><span class="zone"></span><span></span><span></span><span></span><span></span><span class="zone"></span><span class="bk">🧨</span><span class="zone"></span><span></span><span></span><span></span><span></span><span></span><span class="hb">B</span><span class="bb">b</span><span class="bb">b</span><span></span><span class="zone"></span><span class="zone"></span><span class="zone"></span><span></span></div><figcaption>Before: the head is 3 cells from the <code>💣</code> (safe). The dashed cell is where it moves.</figcaption></figure><span class="ex-arrow">→</span><figure class="ex-panel"><div class="board" style="grid-template-columns:repeat(12,20px)"><span class="zone"></span><span class="bk">💣</span><span class="zone"></span><span class="zone"></span><span></span><span></span><span></span><span></span><span></span><span></span><span></span><span></span><span class="zone"></span><span class="zone"></span><span class="zone"></span><span class="zone"></span><span></span><span></span><span></span><span></span><span></span><span></span><span></span><span></span><span class="zone"></span><span class="zone"></span><span class="zone"></span><span class="zone"></span><span class="ba">a</span><span class="ba">a</span><span class="ha bad">A</span><span></span><span class="boom">💥</span><span></span><span></span><span></span><span></span><span></span><span></span><span></span><span></span><span></span><span></span><span></span><span></span><span></span><span></span><span></span><span class="fd">3</span><span class="zone"></span><span class="zone"></span><span class="zone"></span><span></span><span></span><span></span><span></span><span></span><span></span><span></span><span></span><span></span><span class="zone"></span><span class="bk">🧨</span><span class="zone"></span><span></span><span></span><span></span><span></span><span class="zone"></span><span class="zone"></span><span class="zone"></span><span></span><span></span><span class="zone"></span><span class="zone"></span><span class="zone"></span><span></span><span></span><span></span><span></span><span class="zone"></span><span class="bk">🧨</span><span class="zone"></span><span></span><span></span><span></span><span></span><span></span><span class="hb">B</span><span class="bb">b</span><span class="bb">b</span><span></span><span class="zone"></span><span class="zone"></span><span class="zone"></span><span></span></div><figcaption>Boom: <code>A</code>’s score drops to <strong>0</strong>. The <code>💣</code> is gone and a new one appears out of reach of both heads.</figcaption></figure></div><p>Nothing edible is ever inside a zone: the <code>3</code> could not have appeared next to the <code>💣</code> or the <code>🧨</code>, and the new <code>💣</code> was placed away from it. Two bombs in reach at once count once. After round 150 all the bombs disappear. (Real v8 boards are 20–30 per side, with 2 <code>💣</code> and 5 <code>🧨</code>.)</p></div>
+
+
+
+<div class="ex"><h3>v9 — Shooting (21 Oct 2026)</h3><p><code>A</code> (<code>score_1: 8000</code>) sends <code>{"action": "shoot", "data": {"direction": "right"}}</code> instead of moving. The shot flies along row 1 and hits <code>B</code> in the middle of its body.</p><div class="ex-row"><figure class="ex-panel"><div class="board" style="grid-template-columns:repeat(11,20px)"><span></span><span></span><span></span><span></span><span></span><span></span><span></span><span class="bb">b</span><span class="bb">b</span><span class="bb">b</span><span></span><span></span><span class="ba">a</span><span class="ba">a</span><span class="ha">A</span><span class="shot"></span><span class="shot"></span><span class="shot"></span><span class="bb bad">b</span><span></span><span></span><span></span><span></span><span></span><span></span><span></span><span></span><span></span><span></span><span class="bb">b</span><span></span><span></span><span></span><span></span><span></span><span></span><span></span><span></span><span></span><span></span><span class="bb">b</span><span></span><span></span><span></span><span></span><span></span><span class="fd">4</span><span></span><span></span><span></span><span></span><span class="bb">b</span><span></span><span></span><span></span><span></span><span></span><span></span><span></span><span></span><span></span><span></span><span class="bb">b</span><span class="bb">b</span><span class="hb">B</span><span></span><span></span><span></span><span></span><span></span><span></span><span></span><span></span><span></span><span></span><span></span><span></span></div><figcaption>The orange line is the shot; it stops at the first <code>B</code> cell (red).</figcaption></figure><span class="ex-arrow">→</span><figure class="ex-panel"><div class="board" style="grid-template-columns:repeat(11,20px)"><span></span><span></span><span></span><span></span><span></span><span></span><span></span><span class="fd">*</span><span class="fd">*</span><span class="fd">*</span><span></span><span></span><span class="ba">a</span><span class="ba">a</span><span class="ha">A</span><span></span><span></span><span></span><span class="fd">*</span><span></span><span></span><span></span><span></span><span></span><span></span><span></span><span></span><span></span><span></span><span class="bb">b</span><span></span><span></span><span></span><span></span><span></span><span></span><span></span><span></span><span></span><span></span><span class="bb">b</span><span></span><span></span><span></span><span></span><span></span><span class="fd">4</span><span></span><span></span><span></span><span></span><span class="bb">b</span><span></span><span></span><span></span><span></span><span></span><span></span><span></span><span></span><span></span><span></span><span class="bb">b</span><span class="bb">b</span><span class="hb">B</span><span></span><span></span><span></span><span></span><span></span><span></span><span></span><span></span><span></span><span></span><span></span><span></span></div><figcaption><code>A</code> stays put and pays <strong>5000</strong> (8000 → 3000). <code>B</code> loses the hit cell and everything after it: 4 cells become <code>*</code>. <code>score_2</code> is untouched.</figcaption></figure></div><p>Either snake can eat the <code>*</code> (+100 × multiplier, grow one cell): <code>B</code> may race back to recover its own tail. A miss costs the same 5000; with less than 5000 the shot doesn’t fire (−500, invalid action).</p></div>
+
+<div class="ex"><h3>v9 — Shooting: walls are cover</h3><p><code>A</code> shoots <code>right</code> with a <code>#</code> in the way.</p><div class="ex-row"><figure class="ex-panel"><div class="board" style="grid-template-columns:repeat(11,20px)"><span></span><span></span><span></span><span></span><span></span><span class="wl">#</span><span></span><span></span><span></span><span></span><span></span><span></span><span class="ba">a</span><span class="ba">a</span><span class="ha">A</span><span class="shot"></span><span class="wl bad">#</span><span></span><span></span><span class="bb">b</span><span></span><span></span><span></span><span></span><span></span><span></span><span></span><span class="wl">#</span><span></span><span></span><span class="bb">b</span><span></span><span></span><span></span><span></span><span></span><span></span><span></span><span></span><span></span><span></span><span class="hb">B</span><span></span><span></span></div><figcaption>The shot stops at the wall and <code>B</code> is safe. <code>A</code> still pays 5000.</figcaption></figure></div><p>The shot flies over your own body, food, <code>X</code> and bombs without touching them, and it can never hit your own snake.</p></div>
+
+<div class="ex"><h3>v9 — Shooting: a head hit</h3><p><code>A</code> shoots <code>right</code> and the first <code>B</code> cell in the line of fire is its head.</p><div class="ex-row"><figure class="ex-panel"><div class="board" style="grid-template-columns:repeat(11,20px)"><span></span><span></span><span></span><span></span><span></span><span></span><span></span><span></span><span></span><span></span><span></span><span></span><span class="ba">a</span><span class="ba">a</span><span class="ha">A</span><span class="shot"></span><span class="shot"></span><span class="shot"></span><span class="shot"></span><span class="hb bad">B</span><span></span><span></span><span></span><span></span><span></span><span></span><span></span><span></span><span></span><span></span><span class="bb">b</span><span></span><span></span><span></span><span></span><span></span><span></span><span></span><span></span><span></span><span></span><span class="bb">b</span><span></span><span></span></div><figcaption>The shot hits <code>B</code>’s head.</figcaption></figure><span class="ex-arrow">→</span><figure class="ex-panel"><div class="board" style="grid-template-columns:repeat(11,20px)"><span></span><span></span><span></span><span></span><span></span><span></span><span></span><span></span><span></span><span></span><span></span><span></span><span class="ba">a</span><span class="ba">a</span><span class="ha">A</span><span></span><span></span><span></span><span></span><span class="hb">B</span><span></span><span></span><span></span><span></span><span></span><span></span><span></span><span></span><span></span><span></span><span class="fd">*</span><span></span><span></span><span></span><span></span><span></span><span></span><span></span><span></span><span></span><span></span><span class="fd">*</span><span></span><span></span></div><figcaption><code>B</code> is left with just its head; the rest becomes <code>*</code>.</figcaption></figure></div></div>
+
+
+
+<div class="ex"><h3>v10 — Star: 50 turns of invincibility (28 Oct 2026)</h3><p><code>A</code> moves <code>right</code> onto the <code>⭐</code>.</p><div class="ex-row"><figure class="ex-panel"><div class="board" style="grid-template-columns:repeat(11,20px)"><span></span><span></span><span></span><span></span><span></span><span></span><span></span><span></span><span></span><span></span><span></span><span></span><span class="ba">a</span><span class="ba">a</span><span class="ha">A</span><span class="st good">⭐</span><span></span><span></span><span class="fd">4</span><span></span><span></span><span></span><span></span><span></span><span></span><span></span><span></span><span></span><span></span><span></span><span></span><span></span><span></span><span></span><span></span><span></span><span></span><span></span><span class="hb">B</span><span class="bb">b</span><span class="bb">b</span><span></span><span></span><span></span></div><figcaption>Before: <code>invincible_1: 0</code>.</figcaption></figure><span class="ex-arrow">→</span><figure class="ex-panel"><div class="board" style="grid-template-columns:repeat(11,20px)"><span></span><span></span><span></span><span></span><span></span><span></span><span></span><span></span><span></span><span></span><span></span><span></span><span class="ba inv">A</span><span class="ba inv">A</span><span class="ba inv">A</span><span class="ha inv">a</span><span></span><span></span><span class="fd">4</span><span></span><span></span><span></span><span></span><span></span><span></span><span></span><span></span><span></span><span></span><span></span><span></span><span></span><span></span><span></span><span></span><span></span><span></span><span></span><span class="hb">B</span><span class="bb">b</span><span class="bb">b</span><span></span><span></span><span></span></div><figcaption>Like eating a <code>*</code>: <strong>+100</strong> (× multiplier) and one cell longer. Plus <code>invincible_1: 50</code>. <code>A</code> is now drawn <em>inverted</em>: lowercase head <code>a</code>, uppercase body <code>A</code>.</figcaption></figure></div><p>The first star appears after round 20, as far from <code>A</code>’s head as from <code>B</code>’s. The next one comes 20 rounds after the 50 turns are over. With 100 moves left the frenzy starts: 10 stars at once, each one replaced as soon as it is eaten.</p></div>
+
+<div class="ex"><h3>v10 — Star: crashes cost nothing</h3><p>Invincible <code>A</code> moves <code>right</code> into the <code>#</code>.</p><div class="ex-row"><figure class="ex-panel"><div class="board" style="grid-template-columns:repeat(11,20px)"><span></span><span></span><span></span><span></span><span></span><span class="wl">#</span><span></span><span></span><span></span><span></span><span></span><span></span><span></span><span class="ba inv">A</span><span class="ba inv">A</span><span class="ha inv">a</span><span class="wl bad">#</span><span></span><span></span><span></span><span></span><span></span><span></span><span></span><span></span><span></span><span></span><span class="wl">#</span><span></span><span></span><span></span><span></span><span></span></div><figcaption><code>A</code> just stays put: no −500, no score wipe, no tail lost.</figcaption></figure></div><p>The same goes for the board edge and its own body. While invincible, bombs go off without touching your score, a wrong digit costs nothing, and so does an invalid action.</p></div>
+
+<div class="ex"><h3>v10 — Star: ramming the rival</h3><p>Invincible <code>A</code> moves <code>down</code> into <code>B</code>’s body.</p><div class="ex-row"><figure class="ex-panel"><div class="board" style="grid-template-columns:repeat(11,20px)"><span></span><span></span><span></span><span></span><span class="ba inv">A</span><span class="ba inv">A</span><span class="ha inv">a</span><span></span><span></span><span></span><span></span><span></span><span></span><span class="bb">b</span><span class="bb">b</span><span class="bb">b</span><span class="bb">b</span><span class="bb go">b</span><span class="hb">B</span><span></span><span></span><span></span><span></span><span></span><span></span><span></span><span></span><span></span><span></span><span></span><span></span><span></span><span></span></div><figcaption>The dashed cell is where <code>A</code> runs into <code>B</code>.</figcaption></figure><span class="ex-arrow">→</span><figure class="ex-panel"><div class="board" style="grid-template-columns:repeat(11,20px)"><span></span><span></span><span></span><span></span><span class="ba inv">A</span><span class="ba inv">A</span><span class="ha inv">a</span><span></span><span></span><span></span><span></span><span></span><span></span><span class="fd">*</span><span class="fd">*</span><span class="fd">*</span><span class="fd">*</span><span class="fd">*</span><span class="hb">B</span><span></span><span></span><span></span><span></span><span></span><span></span><span></span><span></span><span></span><span></span><span></span><span></span><span></span><span></span></div><figcaption>It cuts <code>B</code> like a shot (for free): from the hit cell to the tail, 5 cells become <code>*</code>. <code>A</code> stays put; <code>score_2</code> is untouched.</figcaption></figure></div><p>If <code>B</code> runs into an invincible <code>A</code>, it is a normal crash for <code>B</code> — unless <code>B</code> is invincible too: then <code>B</code> cuts <code>A</code>. Shots don’t cut an invincible snake (the shooter still pays 5000).</p></div>
+
+
+
+<div class="ex"><h3>v11 — 3D cube: the three planes you see (4 Nov 2026)</h3><p>A small cube: 6 levels × 7 rows × 8 cols. <code>A</code>’s head is at <code>head: {"level": 2, "row": 3, "col": 3}</code>. Its bot receives only these three slices of the cube, all going through its head.</p><div class="ex-row"><figure class="ex-panel"><div class="board" style="grid-template-columns:repeat(7,20px)"><span></span><span></span><span></span><span class="fd">5</span><span></span><span></span><span></span><span></span><span></span><span></span><span></span><span></span><span></span><span></span><span></span><span></span><span></span><span class="ha">A</span><span></span><span></span><span></span><span></span><span></span><span></span><span></span><span></span><span></span><span></span><span></span><span></span><span></span><span></span><span></span><span></span><span></span><span></span><span></span><span></span><span></span><span></span><span></span><span class="fd">4</span></div><figcaption><code>board_x</code>: column 3 seen from the side. Line = level (0 on top), column = row.</figcaption></figure><figure class="ex-panel"><div class="board" style="grid-template-columns:repeat(8,20px)"><span></span><span></span><span></span><span class="fd">5</span><span></span><span></span><span></span><span></span><span></span><span></span><span></span><span></span><span></span><span></span><span></span><span></span><span></span><span class="ba">a</span><span class="ba">a</span><span class="ha">A</span><span></span><span></span><span></span><span></span><span></span><span></span><span></span><span></span><span></span><span></span><span></span><span></span><span></span><span class="bk">🧨</span><span></span><span></span><span></span><span></span><span class="hb">B</span><span></span><span></span><span></span><span></span><span></span><span></span><span></span><span></span><span></span></div><figcaption><code>board_y</code>: row 3 seen from the front. Line = level, column = col. <code>B</code>’s head is two levels below.</figcaption></figure><figure class="ex-panel"><div class="board" style="grid-template-columns:repeat(8,20px)"><span></span><span></span><span></span><span></span><span></span><span></span><span></span><span></span><span></span><span></span><span></span><span></span><span></span><span></span><span class="fd">4</span><span></span><span></span><span></span><span></span><span></span><span></span><span></span><span></span><span></span><span></span><span class="ba">a</span><span class="ba">a</span><span class="ha">A</span><span></span><span></span><span></span><span></span><span></span><span></span><span></span><span></span><span></span><span></span><span></span><span></span><span></span><span></span><span class="mx">X</span><span></span><span></span><span></span><span></span><span></span><span></span><span></span><span></span><span></span><span></span><span></span><span></span><span></span></div><figcaption><code>board_z</code>: level 2 seen from above, the classic board (rows × cols).</figcaption></figure></div><p>The <code>5</code> on level 0 shows up in both <code>board_x</code> and <code>board_y</code>: it is right above the head (<code>ascend</code> twice). A <code>4</code> at level 1, row 0, col 0 shares no coordinate with the head, so it is on none of the planes; so is most of <code>B</code>’s body. After <code>ascend</code> the head moves one line up in <code>board_x</code>/<code>board_y</code> and <code>board_z</code> becomes level 1. (Real boards are 20×20×20.)</p></div><div id="goog-gt-tt" class="VIpgJd-yAWNEb-L7lbkb skiptranslate" style="display: none; border-radius: 12px; margin: 0 0 0 -23px; padding: 0; font-family: 'Google Sans', Arial, sans-serif;" data-id=""><div id="goog-gt-vt" class="VIpgJd-yAWNEb-hvhgNd"><div class="VIpgJd-yAWNEb-hvhgNd-Ud7fr"><img src="./Snake — How to play_files/24px.svg" width="24" height="24" alt=""><div class=" VIpgJd-yAWNEb-hvhgNd-IuizWc-i3jM8c " dir="ltr">Texto original</div></div><div class="VIpgJd-yAWNEb-hvhgNd-k77Iif"><div id="goog-gt-original-text" class="VIpgJd-yAWNEb-nVMfcd-fmcmS VIpgJd-yAWNEb-hvhgNd-axAV1"></div></div><div class="VIpgJd-yAWNEb-hvhgNd-N7Eqid ltr"><div class="VIpgJd-yAWNEb-hvhgNd-N7Eqid-B7I4Od ltr" dir="ltr"><div class="VIpgJd-yAWNEb-hvhgNd-UTujCb">Valora esta traducción</div><div class="VIpgJd-yAWNEb-hvhgNd-eO9mKe">Tu opinión servirá para ayudar a mejorar el Traductor de Google</div></div><div class="VIpgJd-yAWNEb-hvhgNd-xgov5 ltr"><button id="goog-gt-thumbUpButton" type="button" class="VIpgJd-yAWNEb-hvhgNd-bgm6sf" title="Buena traducción" aria-label="Buena traducción" aria-pressed="false"><span id="goog-gt-thumbUpIcon"><svg width="24" height="24" viewBox="0 0 24 24" focusable="false" class="VIpgJd-yAWNEb-hvhgNd-THI6Vb NMm5M"><path d="M21 7h-6.31l.95-4.57.03-.32c0-.41-.17-.79-.44-1.06L14.17 0S7.08 6.85 7 7H2v13h16c.83 0 1.54-.5 1.84-1.22l3.02-7.05c.09-.23.14-.47.14-.73V9c0-1.1-.9-2-2-2zM7 18H4V9h3v9zm14-7l-3 7H9V8l4.34-4.34L12 9h9v2z"></path></svg></span><span id="goog-gt-thumbUpIconFilled"><svg width="24" height="24" viewBox="0 0 24 24" focusable="false" class="VIpgJd-yAWNEb-hvhgNd-THI6Vb NMm5M"><path d="M21 7h-6.31l.95-4.57.03-.32c0-.41-.17-.79-.44-1.06L14.17 0S7.08 6.85 7 7v13h11c.83 0 1.54-.5 1.84-1.22l3.02-7.05c.09-.23.14-.47.14-.73V9c0-1.1-.9-2-2-2zM5 7H1v13h4V7z"></path></svg></span></button><button id="goog-gt-thumbDownButton" type="button" class="VIpgJd-yAWNEb-hvhgNd-bgm6sf" title="Mala traducción" aria-label="Mala traducción" aria-pressed="false"><span id="goog-gt-thumbDownIcon"><svg width="24" height="24" viewBox="0 0 24 24" focusable="false" class="VIpgJd-yAWNEb-hvhgNd-THI6Vb NMm5M"><path d="M3 17h6.31l-.95 4.57-.03.32c0 .41.17.79.44 1.06L9.83 24s7.09-6.85 7.17-7h5V4H6c-.83 0-1.54.5-1.84 1.22l-3.02 7.05c-.09.23-.14.47-.14.73v2c0 1.1.9 2 2 2zM17 6h3v9h-3V6zM3 13l3-7h9v10l-4.34 4.34L12 15H3v-2z"></path></svg></span><span id="goog-gt-thumbDownIconFilled"><svg width="24" height="24" viewBox="0 0 24 24" focusable="false" class="VIpgJd-yAWNEb-hvhgNd-THI6Vb NMm5M"><path d="M3 17h6.31l-.95 4.57-.03.32c0 .41.17.79.44 1.06L9.83 24s7.09-6.85 7.17-7V4H6c-.83 0-1.54.5-1.84 1.22l-3.02 7.05c-.09.23-.14.47-.14.73v2c0 1.1.9 2 2 2zm16 0h4V4h-4v13z"></path></svg></span></button></div></div><div id="goog-gt-votingHiddenPane" class="VIpgJd-yAWNEb-hvhgNd-aXYTce"><form id="goog-gt-votingForm" action="https://translate.googleapis.com/translate_voting?client=te_lib" method="post" target="votingFrame" class="VIpgJd-yAWNEb-hvhgNd-aXYTce"><input type="text" name="sl" id="goog-gt-votingInputSrcLang"><input type="text" name="tl" id="goog-gt-votingInputTrgLang"><input type="text" name="query" id="goog-gt-votingInputSrcText"><input type="text" name="gtrans" id="goog-gt-votingInputTrgText"><input type="text" name="vote" id="goog-gt-votingInputVote"></form><iframe name="votingFrame" frameborder="0" src="./Snake — How to play_files/saved_resource.html"></iframe></div></div></div>
+
+
+
+</body></html>

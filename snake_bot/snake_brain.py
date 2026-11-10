@@ -1,24 +1,29 @@
+"""Coordinate observation, bounded planning and action commitment for each match."""
+
 from collections import Counter, deque
-from dataclasses import replace
+from dataclasses import dataclass, replace
 from snake_bot import food_planner as planning_module
 
 from snake_bot.bot_weights import get_weights
-from snake_bot.game_rules import CRASH_KEEP_LENGTH, CRASH_PENALTY, MAX_MOVES, SHOOT_COST, shoot_directions
+from snake_bot.game_rules import (
+    CRASH_KEEP_LENGTH,
+    CRASH_PENALTY,
+    MAX_MOVES,
+    SHOOT_COST,
+    shoot_directions,
+)
 from snake_bot.food_planner import (
     advantage_control_move,
     apply_move as simulated_move,
     build_food_plans,
-    classify_safety,
     choose_food_plan,
     center_control_score,
     fallback_food_positioning,
     forced_kill_move,
     hot_lost_food_penalty,
-    move_quality_score,
     position_control_penalty,
     rival_response_penalty,
     rival_response_stats,
-    rank_survival_moves,
     should_commit_to_food,
     should_use_plan_for_positioning,
     sequence_gate_hold_move,
@@ -27,7 +32,6 @@ from snake_bot.move_search import TurnSearchCache, rank_deep_moves
 from snake_bot.search_engine import IterativeSearchEngine
 from snake_bot.snake_state import (
     FOOD_SCORE,
-    DIRS,
     apply_action,
     apply_move,
     available_moves,
@@ -37,9 +41,434 @@ from snake_bot.snake_state import (
     parse_state,
     step,
 )
+from snake_bot.geometry import directions_for
+
+
+@dataclass
+class MoveOptions:
+    game_id: str
+    state: object
+    legal: list
+    debug: dict
+    plan: object
+    ranked: list
+    cache: TurnSearchCache
+    hunger: int
+    repeats: int
+    commit: bool
+
+
+@dataclass
+class FoodMovePressure:
+    stats: dict
+    reply_penalty: int
+    position_penalty: int
+    lost_food_penalty: int
+    hard: bool
+    soft: bool
+
+
+def directions_in_cells(targets, cells):
+    return {direction for direction, cell in targets.items() if cell in cells}
+
+
+def record_avoided_moves(debug, wrong, walls):
+    if wrong:
+        debug['avoided_wrong_digit_moves'] = sorted(wrong)
+    if walls:
+        debug['avoided_wall_moves'] = sorted(walls)
+
+
+def valid_advantage(advantage, legal):
+    if advantage['active'] and advantage['override'] and advantage['direction'] in legal:
+        return advantage['direction']
+    return None
+
+
+def ranked_move(ranked, direction):
+    return next((entry for entry in ranked if entry['direction'] == direction), None)
+
+
+def adjacent_trap(plan, current, alternative, move):
+    if plan.our_distance != 1 or plan.endgame_acceptable:
+        return False
+    if not trapped_entry(current):
+        return False
+    return viable_escape(alternative, move)
+
+
+def trapped_entry(entry):
+    return entry is not None and (
+        entry.get('our_replies', 0) == 0 or entry.get('safety') == 'SUICIDAL'
+    )
+
+
+def viable_escape(entry, current):
+    return (
+        entry is not None
+        and entry['direction'] != current
+        and entry.get('safety') != 'SUICIDAL'
+        and entry.get('our_replies', 0) > 0
+    )
+
+
+def review_food_move(options, move, best):
+    pressure = food_move_pressure(options, move)
+    weights = get_weights()
+    move, reason = reply_pressure_move(options, move, pressure)
+    override = deep_override_allowed(options, pressure, weights)
+    arbitrate = should_arbitrate_food_move(options, pressure, weights)
+    options.debug['tactical_arbitration'] = arbitrate
+    options.debug['deep_override_allowed'] = override
+    if override and deep_override_improves(options, move, best, weights):
+        move, reason = best['direction'], 'deep_control'
+    if arbitrate:
+        move, reason = tactical_food_move(options, move, reason, pressure, weights)
+    return avoid_forced_loss(options, move, reason)
+
+
+def food_move_pressure(options, move):
+    state, side = options.state, options.state.side
+    stats = rival_response_stats(state, side, move)
+    reply_penalty = rival_response_penalty(state, side, move)
+    position_penalty = position_control_penalty(state, side, move)
+    lost_food_penalty = hot_lost_food_penalty(state, side, move)
+    options.debug.update(
+        plan_move_stats=stats,
+        plan_move_penalty=reply_penalty,
+        plan_position_penalty=position_penalty,
+        plan_hot_lost_food_penalty=lost_food_penalty,
+    )
+    hard = hard_reply_pressure(stats, options.plan.our_distance)
+    soft = soft_reply_pressure(stats, reply_penalty)
+    return FoodMovePressure(stats, reply_penalty, position_penalty, lost_food_penalty, hard, soft)
+
+
+def hard_reply_pressure(stats, distance):
+    forced = stats['forced_zero'] or stats['forced_delayed_zero']
+    if distance > 1:
+        return forced or bool(stats['zero_escape_replies'])
+    return forced
+
+
+def soft_reply_pressure(stats, reply_penalty):
+    return (
+        stats['one_escape_replies'] >= 2
+        or stats['delayed_forced_zero_replies']
+        or reply_penalty <= -6000
+    )
+
+
+def reply_pressure_move(options, move, pressure):
+    if not (pressure.hard or (options.plan.our_distance > 1 and pressure.soft)):
+        return move, 'food_plan'
+    state, side = options.state, options.state.side
+    fallback = fallback_food_positioning(
+        state, side, options.legal, options.plan, options.hunger, options.repeats
+    )
+    reason = 'food_plan'
+    if rival_response_penalty(state, side, fallback) > pressure.reply_penalty:
+        move, reason = fallback, 'fallback_rival_pressure'
+    return least_trappable_move(options, move, reason)
+
+
+def least_trappable_move(options, move, reason):
+    state, side = options.state, options.state.side
+    best = max(options.legal, key=lambda direction: rival_response_penalty(state, side, direction))
+    improvement = rival_response_penalty(state, side, best) - rival_response_penalty(
+        state, side, move
+    )
+    if improvement >= 5000:
+        return best, 'least_trappable'
+    return move, reason
+
+
+def weak_food_position(options):
+    plan = options.plan
+    return (
+        plan.safety != 'SAFE'
+        or plan.exits_after <= 1
+        or plan.space_after <= 80
+        or options.repeats >= 1
+    )
+
+
+def threatened_food_plan(options, pressure):
+    return (
+        pressure.hard
+        or pressure.soft
+        or weak_food_position(options)
+        or pressure.lost_food_penalty > 0
+    )
+
+
+def deep_override_allowed(options, pressure, weights):
+    return (
+        threatened_food_plan(options, pressure)
+        or pressure.position_penalty >= weights['position_edge1_penalty']
+    )
+
+
+def should_arbitrate_food_move(options, pressure, weights):
+    if options.plan.our_distance <= 1:
+        return False
+    return (
+        threatened_food_plan(options, pressure)
+        or options.plan.race_margin <= 1
+        or pressure.position_penalty >= weights['position_edge2_penalty']
+    )
+
+
+def deep_override_improves(options, move, best, weights):
+    if options.plan.our_distance <= 1:
+        return False
+    if best is None or best['direction'] == move:
+        return False
+    current = ranked_move(options.ranked, move)
+    return (
+        current is not None
+        and best['score'] >= current['score'] + weights['deep_plan_override_margin']
+    )
+
+
+def tactical_food_move(options, move, reason, pressure, weights):
+    state, plan = options.state, options.plan
+
+    def quality(direction):
+        return options.cache.move_quality(
+            state, state.side, direction, plan, options.hunger, options.repeats
+        )
+
+    best = max(options.legal, key=quality)
+    plan_quality, best_quality = quality(move), quality(best)
+    options.debug.update(
+        plan_move_quality=plan_quality,
+        best_tactical_move=best,
+        best_tactical_quality=best_quality,
+        best_tactical_stats=rival_response_stats(state, state.side, best),
+    )
+    margin = tactical_override_margin(pressure, weights)
+    if best != move and best_quality >= plan_quality + margin:
+        return best, 'tactical_override'
+    return move, reason
+
+
+def tactical_override_margin(pressure, weights):
+    stats = pressure.stats
+    if stats['one_escape_replies'] or stats['delayed_forced_zero_replies']:
+        return weights['one_escape_tactical_override_margin']
+    if pressure.position_penalty >= weights['position_edge1_penalty']:
+        return weights['edge_tactical_override_margin']
+    return weights['plan_tactical_override_margin']
+
+
+def avoid_forced_loss(options, move, reason):
+    selected = ranked_move(options.ranked, move)
+    alternative = first_survivable_entry(options.ranked)
+    if selected and selected.get('forced_loss') and alternative:
+        options.debug['forced_loss_avoided'] = selected['direction']
+        return alternative['direction'], 'forced_loss_avoidance'
+    return move, reason
+
+
+def first_survivable_entry(ranked):
+    return next((entry for entry in ranked if survivable_entry(entry)), None)
+
+
+def survivable_entry(entry):
+    return not entry.get('forced_loss') and entry.get('safety') != 'SUICIDAL'
+
+
+def positioning_reason(plan):
+    return 'deep_control' if plan else 'survival_control'
+
+
+def observed_star_deadline(before, remaining_moves):
+    if max(before.invincible_a, before.invincible_b) > 0:
+        return deadline_after_protection(before, remaining_moves)
+    if before.stars:
+        return None
+    return before.star_spawn_due_round
+
+
+def deadline_after_protection(before, remaining_moves):
+    gap = before.remaining_moves - remaining_moves
+    expiration = max(
+        own_expiration_turn(before, side) for side in ('A', 'B') if before.invincibility(side)
+    )
+    if 0 < gap <= 2 and expiration <= gap:
+        return (MAX_MOVES - before.remaining_moves + expiration) / 2 + 20
+    return None
+
+
+def own_expiration_turn(state, side):
+    first_turn = 1 if side == state.side else 2
+    return first_turn + 2 * (state.invincibility(side) - 1)
+
+
+def star_is_due(remaining_moves, deadline):
+    return deadline is not None and (MAX_MOVES - remaining_moves) / 2 >= deadline
+
+
+def passive_player_matches(before, after):
+    side = before.enemy
+    if after.scores[side] != before.scores[side]:
+        return False
+    return stationary_body_prefix(before.body(side), after.body(side))
+
+
+def stationary_body_prefix(before, after):
+    return bool(before and after) and observed_body_prefix(before, after)
+
+
+def observed_body_prefix(before, after):
+    return (
+        before[0] == after[0]
+        and len(after) <= len(before)
+        and set(after) == set(before[: len(after)])
+    )
+
+
+def observed_action(before, after, data):
+    action = data.get('action', data.get('action_type'))
+    direction = data.get('direction')
+    first, second = before.head(before.side), after.head(before.side)
+    if action is None and first != second:
+        action = 'move'
+        direction = direction_between(first, second)
+    if valid_observed_action(action, direction, data):
+        return action, direction
+    return None
+
+
+def valid_observed_action(action, direction, data):
+    return (
+        action in ('move', 'shoot')
+        and direction in directions_for(tuple(data.get('head', {}).values()) or (0, 0))
+        and data.get('action_type', action) == action
+    )
+
+
+def simulate_observed_action(before, action):
+    try:
+        return apply_action(before, *action, before.side)
+    except ValueError:
+        return None
+
+
+def matching_action_result(expected, after):
+    if expected is None:
+        return False
+    if action_result_fields(expected) != action_result_fields(after):
+        return False
+    return all(same_observed_body(expected, after, side) for side in ('A', 'B'))
+
+
+def action_result_fields(state):
+    return (state.scores, state.side, state.shot_food, state.invincible_a, state.invincible_b)
+
+
+def same_observed_body(expected, after, side):
+    expected_body, actual_body = expected.body(side), after.body(side)
+    return (
+        expected.head(side) == after.head(side)
+        and len(expected_body) == len(actual_body)
+        and set(expected_body) == set(actual_body)
+    )
+
+
+def verified_crash_history(expected, history):
+    confirmed = {'A': expected.crashed_a, 'B': expected.crashed_b}
+    return {side: True if history[side] is True else flag for side, flag in confirmed.items()}
+
+
+def trapped_head_has_shot(state):
+    if legal_moves(state, state.side) or not can_shoot(state):
+        return False
+    return bool(
+        shoot_directions(
+            state.head(state.side),
+            state.rows,
+            state.cols,
+            state.walls,
+            state.body(state.enemy),
+        )
+    )
+
+
+def can_shoot(state):
+    return not state.is_terminal() and state.scores[state.side] >= SHOOT_COST
+
+
+def is_shot_key(key):
+    return isinstance(key, tuple) and len(key) == 2 and key[0] == 'shoot'
+
+
+def action_search_diagnostic(search, direction):
+    return {
+        'completed_depth': search.completed_depth,
+        'nodes': search.nodes,
+        'elapsed_ms': search.elapsed_ms,
+        'scores': [action_score_entry(key, value) for key, value in search.scores.items()],
+        'shoot_cost': SHOOT_COST,
+        'source': 'shared_root_search',
+        'fallback_direction': direction,
+    }
+
+
+def action_score_entry(key, value):
+    if isinstance(key, tuple):
+        return {'action_type': key[0], 'direction': key[1], 'score': value}
+    return {'action_type': 'move', 'direction': key, 'score': value}
+
+
+def comparable_move_scores(state, search):
+    moves = available_moves(state, state.side)
+    return {
+        key: value for key, value in search.scores.items() if isinstance(key, str) and key in moves
+    }
+
+
+def move_destinations(state, legal):
+    head = state.head(state.side)
+    return {move: step(head, move) for move in legal}
+
+
+def opponent_has_shot(state, successor):
+    enemy = state.enemy
+    if state.scores[enemy] < SHOOT_COST or successor.invincibility(state.side):
+        return False
+    return bool(
+        shoot_directions(
+            successor.head(enemy),
+            successor.rows,
+            successor.cols,
+            successor.walls,
+            successor.body(state.side),
+        )
+    )
+
+
+def can_commit_shot(state, direction):
+    return state is not None and direction in directions_for(state) and can_shoot(state)
+
+
+def predicted_move_bodies(state, direction):
+    try:
+        return apply_move(state, direction, state.side).snakes
+    except ValueError:
+        prior = state.crashed_a if state.side == 'A' else state.crashed_b
+        if prior is not None or state.scores[state.side] <= 0:
+            raise
+        # Unknown positive-score crash: predict geometry, never economics.
+        snakes = dict(state.snakes)
+        snakes[state.side] = state.body(state.side)[:CRASH_KEEP_LENGTH]
+        return snakes
 
 
 class SnakeBrain:
+    """Reconcile each match and choose actions from current observations and memory."""
+
     def __init__(self, enable_debug=True):
         self.enable_debug = enable_debug
         self.targets = {}
@@ -55,139 +484,298 @@ class SnakeBrain:
         self.pending_moves = {}
         self.observation_tokens = {}
         self.action_searches = {}
+        self.knowledge_states = {}
 
     def observe_state(self, data):
-        """Reconcile server snapshots; predictions never become confirmed history."""
+        """Reconcile server snapshots without confirming predicted actions."""
         game_id = str(data.get('game_id', 'default'))
         previous = self.observed_states.get(game_id)
         history = dict(self.crash_history.get(game_id, {'A': None, 'B': None}))
-        state = parse_state(data, self.previous_snakes.get(game_id), history)
-        if (previous is not None and data.get('remaining_moves') is not None
-                and state.remaining_moves > previous.remaining_moves):
+        state = parse_state(
+            data,
+            self.previous_snakes.get(game_id),
+            history,
+            knowledge=self.knowledge_states.get(game_id),
+        )
+        if self._stale_snapshot(previous, state, data):
             return None
         token = (data.get('turn_token'), state.remaining_moves)
+        state, history = self._reconcile_snapshot(game_id, previous, state, data, history)
+        if state is previous:
+            self.current_states[game_id] = previous
+            self.observation_tokens[game_id] = token
+            return previous
+        return self._store_observation(game_id, previous, state, history, token)
+
+    @staticmethod
+    def _stale_snapshot(previous, state, data):
+        return (
+            previous is not None
+            and data.get('remaining_moves') is not None
+            and state.remaining_moves > previous.remaining_moves
+        )
+
+    def _reconcile_snapshot(self, game_id, previous, state, data, history):
+        if state.partial:
+            return self._partial_snapshot(game_id, previous, state, data, history)
+        return self._complete_snapshot(game_id, previous, state, data, history)
+
+    def _complete_snapshot(self, game_id, previous, state, data, history):
         pending = self.pending_moves.get(game_id)
-        reference = previous
-        if (pending
-                and pending[0].remaining_moves - state.remaining_moves == 1
-                and data.get('action', data.get('action_type')) == (pending[2] if len(pending) > 2 else 'move')):
-            reference = pending[0]
-        single = (reference is not None and reference.remaining_moves - state.remaining_moves == 1
-                  and state.side != reference.side)
-        coherent_action = None
-        if single:
-            history, coherent_action = self._single_action_history(reference, state, data, history)
-        duplicate = previous is not None and previous.remaining_moves == state.remaining_moves
-        if duplicate and not single:
-            if (state.board == previous.board and state.scores == previous.scores
-                    and state.multipliers == previous.multipliers and state.side == previous.side
-                    and state.invincible_a == previous.invincible_a
-                    and state.invincible_b == previous.invincible_b
-                    and state.timeouts_a == previous.timeouts_a
-                    and state.timeouts_b == previous.timeouts_b):
-                self.current_states[game_id] = previous
-                self.observation_tokens[game_id] = token
-                return previous
-            state = parse_state(data, previous.snakes, history)
-            for side in ('A', 'B'):
-                if history[side] is False and (
-                        state.body(side) != previous.body(side)
-                        or state.scores[side] != previous.scores[side]
-                        or state.multipliers[side] != previous.multipliers[side]):
-                    history[side] = None
+        reference = self._action_reference(previous, state, data, pending)
+        if self._one_observed_turn(reference, state):
+            history, action = self._single_action_history(reference, state, data, history)
+            if previous is None:
+                return state, self._initial_history(state, data, history)
+            self._confirm_pending_action(game_id, pending, reference, action)
+            return state, history
         if previous is None:
-            # Only an explicit initial horizon proves nobody has taken a turn.
-            if data.get('remaining_moves') is not None:
-                if state.remaining_moves == MAX_MOVES and state.side == 'A':
-                    history = {'A': False, 'B': False}
-                elif state.remaining_moves == MAX_MOVES - 1 and state.side == 'B':
-                    history['B'] = False
-        elif single:
-            if (pending and reference is pending[0]
-                    and coherent_action == (pending[2] if len(pending) > 2 else 'move', pending[1])):
-                self.pending_moves.pop(game_id, None)
-        elif not duplicate:
-            delta = previous.remaining_moves - state.remaining_moves
-            contiguous = delta == 2 and previous.side == state.side
-            if not contiguous:
-                history = {side: True if value is True else None
-                           for side, value in history.items()}
-            else:
-                for side in ('A', 'B'):
-                    before, after = previous.body(side), state.body(side)
-                    if not before or not after:
-                        if history[side] is False:
-                            history[side] = None
-                        continue
-                    prefix = before[:CRASH_KEEP_LENGTH]
-                    fixed_prefix = (before[0] == after[0]
-                                    and set(after) == set(prefix)
-                                    and len(after) == len(prefix))
-                    old_score, score = previous.scores[side], state.scores[side]
-                    # This side had exactly one protected own turn. A harmless
-                    # stationary move or a ram never becomes first-crash evidence.
-                    if (previous.invincibility(side) > 0
-                            and state.invincibility(side) in (previous.invincibility(side) - 1, 50)):
-                        continue
-                    pending = self.pending_moves.get(game_id)
-                    own_shot = (pending and len(pending) > 2 and pending[2] == 'shoot'
-                                and side == previous.side)
-                    shot_geometry = (before[0] == after[0]
-                                     and set(after).issubset(before)
-                                     and len(after) <= len(before))
-                    if own_shot and shot_geometry and score == old_score - 5000:
-                        # A stationary shot at exactly 5000 also produces zero
-                        # score, but does not provide crash evidence.
-                        continue
-                    if (side != previous.side and old_score >= 5000
-                            and score == old_score - 5000 and shot_geometry):
-                        # The rival action was not observed. In particular,
-                        # shooting at 5000 and a first crash can both end at 0.
-                        if history[side] is False:
-                            history[side] = None
-                        continue
-                    crash_scores = ({0, old_score - CRASH_PENALTY} if old_score > 0
-                                    else {old_score - CRASH_PENALTY})
-                    if fixed_prefix and score in crash_scores:
-                        history[side] = True
-                        snakes = dict(state.snakes)
-                        snakes[side] = prefix
-                        state = replace(state, snakes=snakes,
-                                        reliable_tails=state.reliable_tails | {side})
-                    elif history[side] is False:
-                        normal = (manhattan(before[0], after[0]) == 1
-                                  and ((len(after) == len(before)
-                                        and set(after) == set((after[0],) + before[:-1]))
-                                       or (len(after) == len(before) + 1
-                                           and set(after) == set((after[0],) + before))))
-                        pending = self.pending_moves.get(game_id)
-                        if pending and side == previous.side:
-                            if len(pending) > 2 and pending[2] == 'shoot':
-                                normal = (after == before and score == old_score - 5000)
-                            else:
-                                normal = normal and after[0] == step(before[0], pending[1])
-                        if not normal:
-                            history[side] = None
-            if delta > 2:
-                for side in ('A', 'B'):
-                    # A shot can shorten a body without any crash. Legacy
-                    # matches with no affordable shot retain their v7 proof.
-                    enemy = 'B' if side == 'A' else 'A'
-                    shot_possible = (previous.scores[enemy] >= 5000
-                                     or state.scores[enemy] >= 5000
-                                     or previous.invincibility(enemy) > 0 or state.invincibility(enemy) > 0
-                                     or bool(previous.stars) or bool(state.stars)
-                                     or ('invincible_1' in data and state.remaining_moves <= MAX_MOVES - 40))
-                    if (not shot_possible and len(state.body(side)) < len(previous.body(side))
-                            and state.body(side)):
-                        history[side] = True
-            if not pending or len(pending) < 3 or pending[2] != 'shoot' or (
-                    contiguous and delta == 2
-                    and state.head(previous.side) == previous.head(previous.side)
-                    and state.scores[previous.side] == previous.scores[previous.side] - SHOOT_COST
-                    and len(state.body(previous.side)) <= len(previous.body(previous.side))
-                    and set(state.body(previous.side)) == set(previous.body(previous.side)[:len(state.body(previous.side))])):
-                self.pending_moves.pop(game_id, None)
+            return state, self._initial_history(state, data, history)
+        if previous.remaining_moves == state.remaining_moves:
+            return self._same_turn_snapshot(previous, state, data, history)
+        return self._reconcile_gap(game_id, previous, state, data, history)
+
+    def _partial_snapshot(self, game_id, previous, state, data, history):
+        """Occlusion cannot establish a cut, a crash, or an opponent action."""
+        if previous is None:
+            return state, self._initial_history(state, data, history)
+        if previous.remaining_moves != state.remaining_moves:
+            self.pending_moves.pop(game_id, None)
+        return state, history
+
+    @staticmethod
+    def _pending_kind(pending):
+        return pending[2] if len(pending) > 2 else 'move'
+
+    def _action_reference(self, previous, state, data, pending):
+        if not pending:
+            return previous
+        action = data.get('action', data.get('action_type'))
+        if pending[
+            0
+        ].remaining_moves - state.remaining_moves == 1 and action == self._pending_kind(pending):
+            return pending[0]
+        return previous
+
+    @staticmethod
+    def _one_observed_turn(reference, state):
+        return (
+            reference is not None
+            and reference.remaining_moves - state.remaining_moves == 1
+            and state.side != reference.side
+        )
+
+    def _confirm_pending_action(self, game_id, pending, reference, action):
+        if (
+            pending
+            and reference is pending[0]
+            and action == (self._pending_kind(pending), pending[1])
+        ):
+            self.pending_moves.pop(game_id, None)
+
+    @staticmethod
+    def _initial_history(state, data, history):
+        if data.get('remaining_moves') is None:
+            return history
+        opening = (state.remaining_moves, state.side)
+        if opening == (MAX_MOVES, 'A'):
+            return {'A': False, 'B': False}
+        if opening == (MAX_MOVES - 1, 'B'):
+            history['B'] = False
+        return history
+
+    @staticmethod
+    def _snapshot_identity(state):
+        return (
+            state.board,
+            state.observation,
+            state.scores,
+            state.multipliers,
+            state.side,
+            state.invincible_a,
+            state.invincible_b,
+            state.timeouts_a,
+            state.timeouts_b,
+        )
+
+    @staticmethod
+    def _player_snapshot(state, side):
+        return state.body(side), state.scores[side], state.multipliers[side]
+
+    def _same_turn_snapshot(self, previous, state, data, history):
+        if self._snapshot_identity(previous) == self._snapshot_identity(state):
+            return previous, history
+        state = parse_state(data, previous.snakes, history)
+        for side in ('A', 'B'):
+            if history[side] is False and self._player_snapshot(
+                state, side
+            ) != self._player_snapshot(previous, side):
+                history[side] = None
+        return state, history
+
+    def _reconcile_gap(self, game_id, previous, state, data, history):
+        delta = previous.remaining_moves - state.remaining_moves
+        contiguous = delta == 2 and previous.side == state.side
+        if contiguous:
+            for side in ('A', 'B'):
+                state = self._reconcile_player(game_id, previous, state, side, history)
+        else:
+            history = self._unconfirmed_history(history)
+        if delta > 2:
+            self._infer_gap_crashes(previous, state, data, history)
+        self._clear_gap_prediction(game_id, previous, state, contiguous)
+        return state, history
+
+    @staticmethod
+    def _unconfirmed_history(history):
+        return {side: True if value is True else None for side, value in history.items()}
+
+    def _reconcile_player(self, game_id, previous, state, side, history):
+        before, after = previous.body(side), state.body(side)
+        if not before or not after:
+            self._forget_unconfirmed_crash(history, side)
+            return state
+        if self._protected_turn(previous, state, side):
+            return state
+        return self._reconcile_unprotected_player(
+            self._pending_for_player(game_id, previous, side),
+            previous,
+            state,
+            side,
+            history,
+        )
+
+    def _pending_for_player(self, game_id, previous, side):
+        if side == previous.side:
+            return self.pending_moves.get(game_id)
+        return None
+
+    @staticmethod
+    def _forget_unconfirmed_crash(history, side):
+        if history[side] is False:
+            history[side] = None
+
+    @staticmethod
+    def _protected_turn(previous, state, side):
+        remaining = previous.invincibility(side)
+        return remaining > 0 and state.invincibility(side) in (remaining - 1, 50)
+
+    def _reconcile_unprotected_player(self, own_action, previous, state, side, history):
+        before, after = previous.body(side), state.body(side)
+        old_score, score = previous.scores[side], state.scores[side]
+        if self._could_be_stationary_shot(
+            before, after, old_score, score, own_action, side == previous.side
+        ):
+            if side != previous.side:
+                self._forget_unconfirmed_crash(history, side)
+            return state
+        if self._confirmed_crash(before, after, old_score, score):
+            history[side] = True
+            return self._restore_crash_prefix(state, side, before)
+        if self._unconfirmed_normal_mismatch(
+            history[side], before, after, old_score, score, own_action
+        ):
+            self._forget_unconfirmed_crash(history, side)
+        return state
+
+    def _unconfirmed_normal_mismatch(self, crashed, before, after, old_score, score, pending):
+        return crashed is False and not self._matches_normal_action(
+            before, after, old_score, score, pending
+        )
+
+    def _could_be_stationary_shot(self, before, after, old_score, score, own_action, our_turn):
+        if not self._stationary_suffix_loss(before, after):
+            return False
+        if score != old_score - SHOOT_COST:
+            return False
+        if not our_turn:
+            return old_score >= SHOOT_COST
+        return bool(own_action and self._pending_kind(own_action) == 'shoot')
+
+    @staticmethod
+    def _stationary_suffix_loss(before, after):
+        return before[0] == after[0] and set(after).issubset(before) and len(after) <= len(before)
+
+    @staticmethod
+    def _confirmed_crash(before, after, old_score, score):
+        prefix = before[:CRASH_KEEP_LENGTH]
+        crash_scores = {old_score - CRASH_PENALTY}
+        if old_score > 0:
+            crash_scores.add(0)
+        return (
+            before[0] == after[0]
+            and set(after) == set(prefix)
+            and len(after) == len(prefix)
+            and score in crash_scores
+        )
+
+    @staticmethod
+    def _restore_crash_prefix(state, side, before):
+        snakes = dict(state.snakes)
+        snakes[side] = before[:CRASH_KEEP_LENGTH]
+        return replace(state, snakes=snakes, reliable_tails=state.reliable_tails | {side})
+
+    def _matches_normal_action(self, before, after, old_score, score, pending):
+        if self._is_pending_shot(pending):
+            return after == before and score == old_score - SHOOT_COST
+        if not self._normal_body_step(before, after):
+            return False
+        return not pending or after[0] == step(before[0], pending[1])
+
+    def _is_pending_shot(self, pending):
+        return bool(pending and self._pending_kind(pending) == 'shoot')
+
+    @staticmethod
+    def _normal_body_step(before, after):
+        if manhattan(before[0], after[0]) != 1:
+            return False
+        expected = {
+            len(before): (after[0],) + before[:-1],
+            len(before) + 1: (after[0],) + before,
+        }
+        return set(after) == set(expected.get(len(after), ()))
+
+    def _infer_gap_crashes(self, previous, state, data, history):
+        for side in ('A', 'B'):
+            rival = 'B' if side == 'A' else 'A'
+            length = len(state.body(side))
+            if 0 < length < len(previous.body(side)):
+                if not self._gap_cut_possible(previous, state, data, rival):
+                    history[side] = True
+
+    @staticmethod
+    def _gap_cut_possible(previous, state, data, rival):
+        if max(previous.scores[rival], state.scores[rival]) >= SHOOT_COST:
+            return True
+        if max(previous.invincibility(rival), state.invincibility(rival)) > 0:
+            return True
+        return SnakeBrain._gap_star_possible(previous, state, data)
+
+    @staticmethod
+    def _gap_star_possible(previous, state, data):
+        if previous.stars or state.stars:
+            return True
+        return 'invincible_1' in data and state.remaining_moves <= MAX_MOVES - 40
+
+    def _clear_gap_prediction(self, game_id, previous, state, contiguous):
+        pending = self.pending_moves.get(game_id)
+        if not pending or self._pending_kind(pending) != 'shoot':
+            self.pending_moves.pop(game_id, None)
+        elif contiguous and self._predicted_shot_observed(previous, state):
+            self.pending_moves.pop(game_id, None)
+
+    @staticmethod
+    def _predicted_shot_observed(previous, state):
+        side = previous.side
+        before, after = previous.body(side), state.body(side)
+        return (
+            state.head(side) == previous.head(side)
+            and state.scores[side] == previous.scores[side] - SHOOT_COST
+            and len(after) <= len(before)
+            and set(after) == set(before[: len(after)])
+        )
+
+    def _store_observation(self, game_id, previous, state, history, token):
         if state.tail_food_b:
             history['A'] = True
         if state.tail_food_a:
@@ -199,75 +787,54 @@ class SnakeBrain:
         self.observation_tokens[game_id] = token
         self.current_states[game_id] = state
         self.previous_snakes[game_id] = state.snakes
+        self.knowledge_states[game_id] = state.knowledge
         return state
 
     @staticmethod
     def _observed_star_timing(before, after):
-        """Retain only a provable normal spawn deadline; never predict a cell."""
+        """Keep only a spawn deadline that follows from observed turns."""
+        if after.partial:
+            return after
+        return SnakeBrain._complete_star_timing(before, after)
+
+    @staticmethod
+    def _complete_star_timing(before, after):
         if after.star_frenzy:
             return replace(after, pending_star_spawns=max(0, 10 - len(after.stars)))
-        if after.stars or after.invincible_a or after.invincible_b:
+        if after.stars or max(after.invincible_a, after.invincible_b) > 0:
             return replace(after, star_spawn_due_round=None, pending_star_spawns=0)
         if before is None:
             return after
-        gap = before.remaining_moves - after.remaining_moves
-        due = before.star_spawn_due_round
-        if before.invincible_a or before.invincible_b:
-            expirations = [(1 if actor == before.side else 2) + 2 * (before.invincibility(actor) - 1)
-                           for actor in ('A', 'B') if before.invincibility(actor)]
-            due = ((MAX_MOVES - before.remaining_moves + max(expirations)) / 2 + 20
-                   if 0 < gap <= 2 and max(expirations) <= gap else None)
-        elif before.stars:
-            due = None  # The star may have been consumed in an unobserved interval.
-        return replace(after, star_spawn_due_round=due,
-                       pending_star_spawns=int(due is not None
-                           and (MAX_MOVES - after.remaining_moves) / 2 >= due))
+        due = observed_star_deadline(before, after.remaining_moves)
+        return replace(
+            after,
+            star_spawn_due_round=due,
+            pending_star_spawns=int(star_is_due(after.remaining_moves, due)),
+        )
 
     @staticmethod
     def _single_action_history(before, after, data, history):
         """Infer history only from a coherent one-action server snapshot."""
-        actor, passive = before.side, before.enemy
-        result = {side: True if history[side] is True else None for side in ('A', 'B')}
-        body = after.body(passive)
-        old = before.body(passive)
-        if (body and old and body[0] == old[0] and len(body) <= len(old)
-                and set(body) == set(old[:len(body)]) and after.scores[passive] == before.scores[passive]):
-            result[passive] = history[passive]
-        if (before.invincibility(actor) > 0
-                and after.invincibility(actor) in (before.invincibility(actor) - 1, 50)):
-            result[actor] = history[actor]
-        action = data.get('action', data.get('action_type'))
-        direction = data.get('direction')
-        if action is None and before.head(actor) != after.head(actor):
-            action = 'move'
-            direction = direction_between(before.head(actor), after.head(actor))
-        if (action not in ('move', 'shoot') or direction not in DIRS
-                or data.get('action_type', action) != action):
+        result = SnakeBrain._unconfirmed_history(history)
+        if passive_player_matches(before, after):
+            result[before.enemy] = history[before.enemy]
+        if SnakeBrain._protected_turn(before, after, before.side):
+            result[before.side] = history[before.side]
+        action = observed_action(before, after, data)
+        if action is None:
             return result, None
-        try:
-            expected = apply_action(before, action, direction, actor)
-        except ValueError:
+        expected = simulate_observed_action(before, action)
+        if not matching_action_result(expected, after):
             return result, None
-        matches = (expected.scores == after.scores and expected.side == after.side
-                   and expected.shot_food == after.shot_food
-                   and expected.invincible_a == after.invincible_a
-                   and expected.invincible_b == after.invincible_b
-                   and all(expected.head(side) == after.head(side)
-                           and set(expected.body(side)) == set(after.body(side))
-                           and len(expected.body(side)) == len(after.body(side)) for side in ('A', 'B')))
-        if not matches:
-            return result, None
-        for side in ('A', 'B'):
-            flag = expected.crashed_a if side == 'A' else expected.crashed_b
-            result[side] = True if history[side] is True else flag
-        return result, (action, direction)
+        return verified_crash_history(expected, history), action
 
     def choose_action(self, data):
+        """Select a legal move or a verified useful shot under the search budget."""
         with planning_module.planning_scope():
             return self._choose_action(data)
 
     def _choose_action(self, data):
-        """Compare actions using the same completed tree as movement ranking."""
+        """Compare actions in the same completed tree used to rank moves."""
         game_id = str(data.get('game_id', 'default'))
         self.action_searches.pop(game_id, None)
         direction = self.choose_move(data)
@@ -275,75 +842,114 @@ class SnakeBrain:
             return None
         fallback = {'action_type': 'move', 'direction': direction}
         state = self.current_states.get(game_id)
-        cached = self.action_searches.pop(game_id, None)
-        if (state is not None and cached is None and not legal_moves(state, state.side)
-                and not state.is_terminal() and state.scores[state.side] >= SHOOT_COST
-                and shoot_directions(state.head(state.side), state.rows, state.cols,
-                                     state.walls, state.body(state.enemy))):
-            # The legacy trapped-head path returns before ranking. This is its
-            # only tree: compare official forced crashes against useful shots.
-            weights = get_weights()
-            engine, compact = IterativeSearchEngine.from_game_state(
-                state, time_budget_ms=self._search_time_budget(len(self.previous_snakes)),
-                max_depth=weights['iterative_search_max_depth'])
-            cached = (state, engine.search(compact, state.side, available_moves(state, state.side)))
-        if state is None or cached is None or cached[0] is not state:
+        search = self._action_tree(game_id, state)
+        if search is None:
             return fallback
-        search = cached[1]
+        return self._select_search_action(game_id, state, search, fallback)
+
+    def _action_tree(self, game_id, state):
+        cached = self.action_searches.pop(game_id, None)
+        if state is None:
+            return None
+        if cached is not None:
+            return cached[1] if cached[0] is state else None
+        if trapped_head_has_shot(state):
+            return self._search_trapped_head(state)
+        return None
+
+    def _search_trapped_head(self, state):
+        """Compare the forced moves and shots when movement ranking returned early."""
+        weights = get_weights()
+        engine, compact = IterativeSearchEngine.from_game_state(
+            state,
+            time_budget_ms=self._search_time_budget(len(self.previous_snakes)),
+            max_depth=weights['iterative_search_max_depth'],
+        )
+        return engine.search(compact, state.side, available_moves(state, state.side))
+
+    def _select_search_action(self, game_id, state, search, fallback):
+        direction = fallback['direction']
         debug = self.last_decisions.setdefault(game_id, {'event': 'decision_debug'})
-        diagnostic = {'completed_depth': search.completed_depth, 'nodes': search.nodes,
-                      'elapsed_ms': search.elapsed_ms,
-                      'scores': [{'action_type': key[0] if isinstance(key, tuple) else 'move',
-                                  'direction': key[1] if isinstance(key, tuple) else key,
-                                  'score': value} for key, value in search.scores.items()],
-                      'shoot_cost': SHOOT_COST, 'source': 'shared_root_search',
-                      'fallback_direction': direction}
+        diagnostic = action_search_diagnostic(search, direction)
         debug['action_search'] = diagnostic
-        # A completed iteration already compares movement economics. Spending
-        # 5000 requires the existing, more conservative depth gate below.
         if search.completed_depth == 0:
             diagnostic['selection'] = 'insufficient_completed_depth'
             return fallback
-        comparable_moves = available_moves(state, state.side)
-        moves = {key: value for key, value in search.scores.items()
-                 if isinstance(key, str) and key in comparable_moves}
+        moves = comparable_move_scores(state, search)
         if not moves:
             diagnostic['selection'] = 'no_comparable_moves'
             return fallback
         best_move = max(moves, key=moves.get)
+        shot = self._profitable_shot(state, search, moves[best_move])
+        if shot is not None:
+            return self._record_search_shot(
+                game_id, state, debug, diagnostic, shot, moves[best_move]
+            )
+        repair = self._repair_search_exposure(
+            state, direction, moves, best_move, debug, diagnostic
+        )
+        return repair or fallback
+
+    def _profitable_shot(self, state, search, best_move_score):
+        if search.completed_depth < get_weights()['iterative_search_min_apply_depth']:
+            return None
+        shots = self._effective_shot_scores(state, search)
+        if not shots:
+            return None
+        direction = max(shots, key=lambda key: shots[key][0])
+        value, metadata = shots[direction]
+        if value > best_move_score:
+            return direction, value, metadata
+        return None
+
+    def _effective_shot_scores(self, state, search):
         shots = {}
         for key, value in search.scores.items():
-            if (search.completed_depth >= get_weights()['iterative_search_min_apply_depth']
-                    and isinstance(key, tuple) and len(key) == 2 and key[0] == 'shoot'):
+            if is_shot_key(key):
                 outcome = self._effective_shot(state, key[1])
                 if outcome is not None:
-                    shots[key[1]] = (value, outcome.last_action)
-        if shots:
-            shot = max(shots, key=lambda key: shots[key][0])
-            if shots[shot][0] > moves[best_move]:
-                diagnostic.update(selection='profitable_hit', selected_score=shots[shot][0],
-                                  best_move_score=moves[best_move], **shots[shot][1])
-                debug.update(action_type='shoot', direction=shot, reason='shared_search_profitable_shoot')
-                self.targets[(game_id, state.side)] = None
-                return {'action_type': 'shoot', 'direction': shot}
-        # Raw search can repair a concrete new tactical exposure without
-        # replacing established v1-v7 planning in ordinary positions.
+                    shots[key[1]] = value, outcome.last_action
+        return shots
+
+    def _record_search_shot(self, game_id, state, debug, diagnostic, shot, best_move_score):
+        direction, value, metadata = shot
+        diagnostic.update(
+            selection='profitable_hit',
+            selected_score=value,
+            best_move_score=best_move_score,
+            **metadata,
+        )
+        debug.update(
+            action_type='shoot',
+            direction=direction,
+            reason='shared_search_profitable_shoot',
+        )
+        self.targets[(game_id, state.side)] = None
+        return {'action_type': 'shoot', 'direction': direction}
+
+    def _repair_search_exposure(self, state, direction, moves, best, debug, diagnostic):
         risk = self._action_exposure(state, direction, moves)
-        if (risk and direction in moves and moves[best_move] > moves[direction]):
-            diagnostic.update(selection=risk, selected_score=moves[best_move],
-                              fallback_score=moves[direction])
-            debug.update(action_type='move', direction=best_move, reason='shared_search_' + risk)
-            return {'action_type': 'move', 'direction': best_move}
+        if risk and direction in moves and moves[best] > moves[direction]:
+            diagnostic.update(
+                selection=risk,
+                selected_score=moves[best],
+                fallback_score=moves[direction],
+            )
+            debug.update(action_type='move', direction=best, reason='shared_search_' + risk)
+            return {'action_type': 'move', 'direction': best}
         diagnostic['selection'] = 'conservative_move'
-        return fallback
+        return None
 
     @staticmethod
     def _effective_shot(state, direction):
-        if (direction not in DIRS or state.is_terminal()
-                or state.scores[state.side] < SHOOT_COST):
+        if direction not in directions_for(state) or not can_shoot(state):
             return None
         outcome = apply_action(state, 'shoot', direction, state.side)
-        return outcome if outcome.last_action['hit'] and outcome.last_action['cut_length'] > 0 else None
+        return (
+            outcome
+            if outcome.last_action['hit'] and outcome.last_action['cut_length'] > 0
+            else None
+        )
 
     @staticmethod
     def _action_exposure(state, direction, moves):
@@ -354,13 +960,7 @@ class SnakeBrain:
         successor = simulated_move(state, direction, state.side, perspective=state.side)
         if successor.last_action.get('bomb_triggered'):
             return 'bomb_economics'
-        enemy = state.enemy
-        if state.scores[enemy] < SHOOT_COST or successor.invincibility(state.side):
-            return None
-        target = successor.body(state.side)
-        if (len(target) >= 2 and successor.head(enemy) is not None
-                and shoot_directions(successor.head(enemy), successor.rows, successor.cols,
-                                     successor.walls, target)):
+        if opponent_has_shot(state, successor):
             return 'opponent_shoot_reply'
         return None
 
@@ -379,271 +979,152 @@ class SnakeBrain:
         return {'action_type': 'move', 'direction': self.safe_direction(data, direction)}
 
     def choose_move(self, data):
+        """Reconcile one turn and rank its safe movement options within the planning scope."""
         game_id = str(data.get('game_id', 'default'))
         state = self.observe_state(data)
         if state is None:
             return None
         self.current_states[game_id] = state
-        side = state.side
-        self._update_food_clock(game_id, side, state)
-
-        legal = legal_moves(state, side)
+        self._update_food_clock(game_id, state.side, state)
+        legal = legal_moves(state, state.side)
         debug = self._base_debug(data, state, legal)
         if not legal:
-            move = next(iter(available_moves(state, side)), 'up')
+            move = next(iter(available_moves(state, state.side)), 'up')
             self._save_debug(game_id, debug, 'no_safe_moves', move)
             return move
-
-        kill = forced_kill_move(state, side, legal)
+        kill = forced_kill_move(state, state.side, legal)
         if kill:
-            self._save_debug(game_id, debug, 'forced_kill', kill)
-            self._remember(game_id, state)
-            return kill
+            return self._save_selected_move(game_id, state, debug, kill, 'forced_kill')
+        legal = self._clean_legal_moves(state, legal, debug)
+        choice = self._rank_move_options(game_id, state, legal, debug)
+        return self._select_ranked_move(choice)
 
-        clean_legal = [
-            direction for direction in legal
-            if (state.invincibility(side) or step(state.head(side), direction) not in state.wrong_food())
-            and (state.invincibility(side) or step(state.head(side), direction) not in state.walls)
-        ]
-        if clean_legal:
-            avoided = set(legal) - set(clean_legal)
-            wrong_avoided = [
-                direction for direction in avoided
-                if step(state.head(side), direction) in state.wrong_food()
-            ]
-            wall_avoided = [
-                direction for direction in avoided
-                if step(state.head(side), direction) in state.walls
-            ]
-            if wrong_avoided:
-                debug['avoided_wrong_digit_moves'] = sorted(wrong_avoided)
-            if wall_avoided:
-                debug['avoided_wall_moves'] = sorted(wall_avoided)
-            legal = clean_legal
-            debug['legal'] = legal
+    def _save_selected_move(self, game_id, state, debug, move, reason):
+        self._save_debug(game_id, debug, reason, move)
+        self._remember(game_id, state)
+        return move
 
+    @staticmethod
+    def _clean_legal_moves(state, legal, debug):
+        if state.invincibility(state.side):
+            return legal
+        targets = move_destinations(state, legal)
+        wrong = directions_in_cells(targets, state.wrong_food())
+        walls = directions_in_cells(targets, state.walls)
+        clean = [move for move in legal if move not in (wrong | walls)]
+        if not clean:
+            return legal
+        record_avoided_moves(debug, wrong, walls)
+        debug['legal'] = clean
+        return clean
+
+    def _rank_move_options(self, game_id, state, legal, debug):
+        side = state.side
         current_target = self.targets.get((game_id, side))
         hunger = self.turns_since_food[(game_id, side)]
-        repeat_count = self._repeat_count(game_id, state)
-        search_cache = TurnSearchCache()
+        repeats = self._repeat_count(game_id, state)
+        cache = TurnSearchCache()
         active_games = len(self.previous_snakes) + (game_id not in self.previous_snakes)
-        search_time_ms = self._search_time_budget(active_games)
-        food_plans = build_food_plans(state, side, current_target, hunger)
-        plan = choose_food_plan(state, side, current_target, hunger, plans=food_plans)
-        deep_moves = rank_deep_moves(
+        time_ms = self._search_time_budget(active_games)
+        plans = build_food_plans(state, side, current_target, hunger)
+        plan = choose_food_plan(state, side, current_target, hunger, plans=plans)
+        ranked = rank_deep_moves(
             state,
             side,
             legal,
             plan,
             hunger,
-            repeat_count,
-            search_cache,
-            search_time_ms=search_time_ms,
+            repeats,
+            cache,
+            search_time_ms=time_ms,
         )
-        action_search = getattr(search_cache, 'action_search', None)
+        action_search = getattr(cache, 'action_search', None)
         if action_search is not None:
             self.action_searches[game_id] = (state, action_search)
+        commit = bool(plan and should_commit_to_food(plan, hunger, repeats))
         debug.update(
             {
                 'current_target': current_target,
                 'hunger': hunger,
-                'repeat_count': repeat_count,
+                'repeat_count': repeats,
                 'active_games': active_games,
-                'search_time_budget_ms': search_time_ms,
+                'search_time_budget_ms': time_ms,
                 'plan': self._plan_debug(plan),
-                'commit_to_plan': should_commit_to_food(plan, hunger, repeat_count) if plan else False,
-                'deep_moves': deep_moves[:4],
+                'commit_to_plan': commit,
+                'deep_moves': ranked[:4],
             }
         )
         if self.enable_debug:
-            debug.update(
-                {
-                    'food_options': self._food_options(food_plans),
-                    'candidate_moves': self._candidate_moves(state, side, legal, deep_moves),
-                }
-            )
+            debug['food_options'] = self._food_options(plans)
+            debug['candidate_moves'] = self._candidate_moves(state, side, legal, ranked)
+        return MoveOptions(
+            game_id, state, legal, debug, plan, ranked, cache, hunger, repeats, commit
+        )
 
-        commit_to_plan = should_commit_to_food(plan, hunger, repeat_count) if plan else False
-        debug['commit_to_plan'] = commit_to_plan
+    def _select_ranked_move(self, options):
+        plan = options.plan
+        advantage = self._advantage_move(options)
+        if advantage is not None:
+            self.targets[(options.game_id, options.state.side)] = None
+            return self._finish_ranked_move(options, advantage, 'advantage_control')
+        if options.commit:
+            self.targets[(options.game_id, options.state.side)] = plan.food
+            if plan.first_move in options.legal:
+                move, reason = self._committed_food_move(options)
+                self._remember_progress(options.game_id, options.state.side, options.state, plan)
+                return self._finish_ranked_move(options, move, reason)
+        move, reason = self._positioning_move(options)
+        return self._finish_ranked_move(options, move, reason)
 
-        reference_move = plan.first_move if plan and commit_to_plan and plan.first_move in legal else None
+    def _finish_ranked_move(self, options, move, reason):
+        return self._save_selected_move(
+            options.game_id, options.state, options.debug, move, reason
+        )
+
+    @staticmethod
+    def _advantage_move(options):
+        state, plan, legal = options.state, options.plan, options.legal
+        reference = plan.first_move if options.commit else None
         advantage = advantage_control_move(
             state,
-            side,
+            state.side,
             legal,
-            deep_moves,
-            reference_move=reference_move,
+            options.ranked,
+            reference_move=reference if reference in legal else None,
             adjacent_food=bool(plan and plan.our_distance == 1),
         )
-        debug['advantage_control'] = advantage
-        if advantage['active'] and advantage['override'] and advantage['direction'] in legal:
-            move = advantage['direction']
-            self.targets[(game_id, side)] = None
-            self._save_debug(game_id, debug, 'advantage_control', move)
-            self._remember(game_id, state)
-            return move
+        options.debug['advantage_control'] = advantage
+        return valid_advantage(advantage, legal)
 
-        if plan and commit_to_plan:
-            self.targets[(game_id, side)] = plan.food
-            move = plan.first_move
-            reason = 'food_plan'
-            if move in legal:
-                best_deep = deep_moves[0] if deep_moves else None
-                plan_deep = next((item for item in deep_moves if item['direction'] == move), None)
-                adjacent_trap = (
-                    plan.our_distance == 1
-                    and not plan.endgame_acceptable
-                    and plan_deep is not None
-                    and (
-                        plan_deep.get('our_replies', 0) == 0
-                        or plan_deep.get('safety') == 'SUICIDAL'
-                    )
-                    and best_deep is not None
-                    and best_deep['direction'] != move
-                    and best_deep.get('safety') != 'SUICIDAL'
-                    and best_deep.get('our_replies', 0) > 0
-                )
-                debug['adjacent_trap_detected'] = adjacent_trap
-                if adjacent_trap:
-                    move = best_deep['direction']
-                    reason = 'adjacent_trap_avoidance'
-                    self._remember_progress(game_id, side, state, plan)
-                    self._save_debug(game_id, debug, reason, move)
-                    self._remember(game_id, state)
-                    return move
+    @staticmethod
+    def _committed_food_move(options):
+        state, plan, legal = options.state, options.plan, options.legal
+        best = next(iter(options.ranked), None)
+        move = plan.first_move
+        trapped = adjacent_trap(plan, ranked_move(options.ranked, move), best, move)
+        options.debug['adjacent_trap_detected'] = trapped
+        if trapped:
+            return best['direction'], 'adjacent_trap_avoidance'
+        hold = sequence_gate_hold_move(state, state.side, legal, plan, options.ranked)
+        if hold is not None:
+            options.debug['sequence_gate_held'] = True
+            return hold, 'sequence_gate_hold'
+        return review_food_move(options, move, best)
 
-                hold_move = sequence_gate_hold_move(state, side, legal, plan, deep_moves)
-                if hold_move is not None:
-                    debug['sequence_gate_held'] = True
-                    move = hold_move
-                    reason = 'sequence_gate_hold'
-                    self._remember_progress(game_id, side, state, plan)
-                    self._save_debug(game_id, debug, reason, move)
-                    self._remember(game_id, state)
-                    return move
-
-                stats = rival_response_stats(state, side, move)
-                move_penalty = rival_response_penalty(state, side, move)
-                plan_position_penalty = position_control_penalty(state, side, move)
-                plan_hot_lost_penalty = hot_lost_food_penalty(state, side, move)
-                debug['plan_move_stats'] = stats
-                debug['plan_move_penalty'] = move_penalty
-                debug['plan_position_penalty'] = plan_position_penalty
-                debug['plan_hot_lost_food_penalty'] = plan_hot_lost_penalty
-                hard_pressure = stats['forced_zero'] or stats['forced_delayed_zero']
-                if plan.our_distance > 1:
-                    hard_pressure = hard_pressure or bool(stats['zero_escape_replies'])
-                soft_pressure = (
-                    stats['one_escape_replies'] >= 2
-                    or stats['delayed_forced_zero_replies']
-                    or move_penalty <= -6000
-                )
-                if (
-                    hard_pressure
-                    or (plan.our_distance > 1 and soft_pressure)
-                ):
-                    fallback = fallback_food_positioning(state, side, legal, plan, hunger, repeat_count)
-                    if rival_response_penalty(state, side, fallback) > move_penalty:
-                        move = fallback
-                        reason = 'fallback_rival_pressure'
-                    least_trappable = max(legal, key=lambda candidate: rival_response_penalty(state, side, candidate))
-                    if rival_response_penalty(state, side, least_trappable) - rival_response_penalty(state, side, move) >= 5000:
-                        move = least_trappable
-                        reason = 'least_trappable'
-                weights = get_weights()
-                should_arbitrate = (
-                    plan.our_distance > 1
-                    and (
-                        hard_pressure
-                        or soft_pressure
-                        or plan.safety != 'SAFE'
-                        or plan.race_margin <= 1
-                        or plan.exits_after <= 1
-                        or plan.space_after <= 80
-                        or repeat_count >= 1
-                        or plan_hot_lost_penalty > 0
-                        or plan_position_penalty >= weights['position_edge2_penalty']
-                    )
-                )
-                debug['tactical_arbitration'] = should_arbitrate
-                plan_deep = next((item for item in deep_moves if item['direction'] == move), None)
-                deep_override_allowed = (
-                    hard_pressure
-                    or soft_pressure
-                    or plan.safety != 'SAFE'
-                    or plan.exits_after <= 1
-                    or plan.space_after <= 80
-                    or repeat_count >= 1
-                    or plan_hot_lost_penalty > 0
-                    or plan_position_penalty >= weights['position_edge1_penalty']
-                )
-                debug['deep_override_allowed'] = deep_override_allowed
-                if deep_override_allowed and plan.our_distance > 1 and best_deep and best_deep['direction'] != move:
-                    if plan_deep and best_deep['score'] >= plan_deep['score'] + weights['deep_plan_override_margin']:
-                        move = best_deep['direction']
-                        reason = 'deep_control'
-                if should_arbitrate:
-                    best_tactical = max(
-                        legal,
-                        key=lambda candidate: search_cache.move_quality(state, side, candidate, plan, hunger, repeat_count),
-                    )
-                    plan_quality = (
-                        search_cache.move_quality(state, side, move, plan, hunger, repeat_count),
-                        0,
-                        0,
-                        0,
-                    )
-                    best_quality = (
-                        search_cache.move_quality(state, side, best_tactical, plan, hunger, repeat_count),
-                        0,
-                        0,
-                        0,
-                    )
-                    best_stats = rival_response_stats(state, side, best_tactical)
-                    debug['plan_move_quality'] = plan_quality[0]
-                    debug['best_tactical_move'] = best_tactical
-                    debug['best_tactical_quality'] = best_quality[0]
-                    debug['best_tactical_stats'] = best_stats
-                    margin = weights['plan_tactical_override_margin']
-                    if stats['one_escape_replies'] or stats['delayed_forced_zero_replies']:
-                        margin = weights['one_escape_tactical_override_margin']
-                    elif plan_position_penalty >= weights['position_edge1_penalty']:
-                        margin = weights['edge_tactical_override_margin']
-                    if best_tactical != move and best_quality[0] >= plan_quality[0] + margin:
-                        move = best_tactical
-                        reason = 'tactical_override'
-                selected_deep = next((item for item in deep_moves if item['direction'] == move), None)
-                survivable_deep = next(
-                    (
-                        item for item in deep_moves
-                        if not item.get('forced_loss') and item.get('safety') != 'SUICIDAL'
-                    ),
-                    None,
-                )
-                if selected_deep and selected_deep.get('forced_loss') and survivable_deep:
-                    move = survivable_deep['direction']
-                    reason = 'forced_loss_avoidance'
-                    debug['forced_loss_avoided'] = selected_deep['direction']
-                self._remember_progress(game_id, side, state, plan)
-                self._save_debug(game_id, debug, reason, move)
-                self._remember(game_id, state)
-                return move
-
-        self.targets[(game_id, side)] = plan.food if plan and should_use_plan_for_positioning(plan) else None
-        positioning_plan = plan if should_use_plan_for_positioning(plan) else None
-        fallback_deep = deep_moves or rank_deep_moves(state, side, legal, positioning_plan, hunger, repeat_count, search_cache)
-        if fallback_deep:
-            debug['survival_candidates'] = fallback_deep[:4]
-            move = fallback_deep[0]['direction']
-            reason = 'deep_control'
-            if not plan or not should_use_plan_for_positioning(plan):
-                reason = 'survival_control'
-        else:
-            move = fallback_food_positioning(state, side, legal, positioning_plan, hunger, repeat_count)
-            reason = 'fallback_positioning'
-        self._save_debug(game_id, debug, reason, move)
-        self._remember(game_id, state)
-        return move
+    def _positioning_move(self, options):
+        state, plan, legal = options.state, options.plan, options.legal
+        positioning = plan if should_use_plan_for_positioning(plan) else None
+        self.targets[(options.game_id, state.side)] = positioning.food if positioning else None
+        ranked = options.ranked or rank_deep_moves(
+            state, state.side, legal, positioning, options.hunger, options.repeats, options.cache
+        )
+        if ranked:
+            options.debug['survival_candidates'] = ranked[:4]
+            return ranked[0]['direction'], positioning_reason(positioning)
+        move = fallback_food_positioning(
+            state, state.side, legal, positioning, options.hunger, options.repeats
+        )
+        return move, 'fallback_positioning'
 
     @staticmethod
     def _search_time_budget(active_games):
@@ -657,6 +1138,7 @@ class SnakeBrain:
         return full_budget
 
     def safe_direction(self, data, direction):
+        """Repair an unsafe proposal using currently observed legal moves."""
         game_id = str(data.get('game_id', 'default'))
         state = self.current_states.get(game_id)
         if state is None:
@@ -674,26 +1156,18 @@ class SnakeBrain:
         return fallback
 
     def commit_move(self, data, direction):
+        """Keep an unconfirmed own-body prediction until the next server observation."""
         game_id = str(data.get('game_id', 'default'))
         state = self.current_states.get(game_id)
         if state is None:
             state = self.observe_state(data)
-        if direction in DIRS and not state.is_terminal():
+        if direction in directions_for(state) and not state.is_terminal():
             self.pending_moves[game_id] = (state, direction)
-            try:
-                predicted = apply_move(state, direction, state.side)
-                snakes = predicted.snakes
-            except ValueError:
-                unknown = state.crashed_a if state.side == 'A' else state.crashed_b
-                if unknown is not None or state.scores[state.side] <= 0:
-                    raise
-                # Unknown positive-score crash: predict geometry, never economics.
-                snakes = dict(state.snakes)
-                snakes[state.side] = state.body(state.side)[:CRASH_KEEP_LENGTH]
-            self.previous_snakes[game_id] = snakes
+            self.previous_snakes[game_id] = predicted_move_bodies(state, direction)
         self.current_states.pop(game_id, None)
 
     def commit_action(self, data, action):
+        """Record the sent action without treating its predicted effects as server facts."""
         if action.get('action_type', 'move') == 'move':
             return self.commit_move(data, action.get('direction'))
         game_id = str(data.get('game_id', 'default'))
@@ -701,14 +1175,14 @@ class SnakeBrain:
         if state is None:
             state = self.observe_state(data)
         direction = action.get('direction')
-        if (state is not None and direction in DIRS and not state.is_terminal()
-                and state.scores[state.side] >= 5000):
+        if can_commit_shot(state, direction):
             predicted = apply_action(state, 'shoot', direction, state.side)
             self.pending_moves[game_id] = (state, direction, 'shoot')
             self.previous_snakes[game_id] = predicted.snakes
         self.current_states.pop(game_id, None)
 
     def forget(self, game_id):
+        """Release predictions, memory and strategy data belonging to a finished match."""
         for key in list(self.targets):
             if key[0] == str(game_id):
                 self.targets.pop(key, None)
@@ -724,8 +1198,10 @@ class SnakeBrain:
         self.pending_moves.pop(str(game_id), None)
         self.observation_tokens.pop(str(game_id), None)
         self.action_searches.pop(str(game_id), None)
+        self.knowledge_states.pop(str(game_id), None)
 
     def decision_debug(self, game_id):
+        """Return the bounded decision diagnostics for one match when debugging is enabled."""
         return self.last_decisions.get(str(game_id))
 
     def _update_food_clock(self, game_id, side, state):
@@ -749,12 +1225,20 @@ class SnakeBrain:
             tuple(sorted(state.multipliers.items())),
             tuple(sorted(state.walls)),
             tuple(sorted(state.scores.items())),
-            state.crashed_a, state.crashed_b,
-            tuple(sorted(state.tail_food_a)), tuple(sorted(state.tail_food_b)),
-            tuple(sorted(state.bombs_large)), tuple(sorted(state.bombs_small)),
-            tuple(sorted(state.shot_food)), state.pending_bomb_respawns,
-            tuple(sorted(state.stars)), state.invincible_a, state.invincible_b,
-            state.star_frenzy, state.star_spawn_due_round, state.pending_star_spawns,
+            state.crashed_a,
+            state.crashed_b,
+            tuple(sorted(state.tail_food_a)),
+            tuple(sorted(state.tail_food_b)),
+            tuple(sorted(state.bombs_large)),
+            tuple(sorted(state.bombs_small)),
+            tuple(sorted(state.shot_food)),
+            state.pending_bomb_respawns,
+            tuple(sorted(state.stars)),
+            state.invincible_a,
+            state.invincible_b,
+            state.star_frenzy,
+            state.star_spawn_due_round,
+            state.pending_star_spawns,
             self.targets.get((game_id, state.side)),
         )
         self.recent_states.setdefault(game_id, deque(maxlen=80)).append(key)
@@ -769,12 +1253,20 @@ class SnakeBrain:
             tuple(sorted(state.multipliers.items())),
             tuple(sorted(state.walls)),
             tuple(sorted(state.scores.items())),
-            state.crashed_a, state.crashed_b,
-            tuple(sorted(state.tail_food_a)), tuple(sorted(state.tail_food_b)),
-            tuple(sorted(state.bombs_large)), tuple(sorted(state.bombs_small)),
-            tuple(sorted(state.shot_food)), state.pending_bomb_respawns,
-            tuple(sorted(state.stars)), state.invincible_a, state.invincible_b,
-            state.star_frenzy, state.star_spawn_due_round, state.pending_star_spawns,
+            state.crashed_a,
+            state.crashed_b,
+            tuple(sorted(state.tail_food_a)),
+            tuple(sorted(state.tail_food_b)),
+            tuple(sorted(state.bombs_large)),
+            tuple(sorted(state.bombs_small)),
+            tuple(sorted(state.shot_food)),
+            state.pending_bomb_respawns,
+            tuple(sorted(state.stars)),
+            state.invincible_a,
+            state.invincible_b,
+            state.star_frenzy,
+            state.star_spawn_due_round,
+            state.pending_star_spawns,
             self.targets.get((game_id, state.side)),
         )
         return sum(1 for item in self.recent_states.get(game_id, ()) if item == key)
@@ -812,6 +1304,7 @@ class SnakeBrain:
             'legal': legal,
             'scores': state.scores,
             'remaining_moves': state.remaining_moves,
+            'knowledge': decision_knowledge(state),
         }
 
     def _save_debug(self, game_id, debug, reason, direction):
@@ -902,6 +1395,7 @@ class SnakeBrain:
 
 
 def final_safe_direction(data, direction):
+    """Repair a proposed direction using the currently observed legal neighbors."""
     state = parse_state(data)
     legal = legal_moves(state, state.side)
     if direction in legal:
@@ -909,3 +1403,18 @@ def final_safe_direction(data, direction):
     if legal:
         return fallback_food_positioning(state, state.side, legal, None, 0, 0)
     return next(iter(available_moves(state, state.side)), 'up')
+
+
+def decision_knowledge(state):
+    """Summarize live uncertainty without copying the entire remembered map."""
+    if not state.partial:
+        return {}
+    return {
+        'levels': state.levels,
+        'partial_observation': True,
+        'observed_cell_count': len(state.observation.cells),
+        'remembered_object_count': len(state.knowledge.remembered),
+        'memory_confidence': 'possibly_outdated',
+        'last_enemy_head': state.knowledge.last_enemy_head,
+        'last_enemy_turn': state.knowledge.last_enemy_turn,
+    }

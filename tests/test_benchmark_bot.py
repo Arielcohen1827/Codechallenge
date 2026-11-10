@@ -36,17 +36,35 @@ class BenchmarkTests(unittest.TestCase):
                                        self.output, **kwargs)
 
     def test_side_attribution_includes_each_event_and_scores(self):
-        for side, candidate_score, candidate_foods in [('A', 10, 1), ('B', 3, 2)]:
+        for side, candidate_score, candidate_foods in [
+            ('A', 10, 1),
+            ('B', 3, 2),
+        ]:
             with self.subTest(side=side):
                 row = benchmark.normalize_game(result(), 17, 2, side)
                 self.assertEqual(row['candidate_score'], candidate_score)
-                self.assertEqual(row['events']['candidate']['correct_foods'], candidate_foods)
+                self.assertEqual(
+                    row['events']['candidate']['correct_foods'],
+                    candidate_foods,
+                )
                 offset = 0 if side == 'A' else 1
-                self.assertEqual(row['events']['candidate']['wrong_digits'], 3 + offset)
-                self.assertEqual(row['events']['candidate']['pickups'], 5 + offset)
-                self.assertEqual(row['events']['candidate']['wall_hits'], 7 + offset)
-                self.assertEqual(row['events']['reference']['correct_foods'], 3-candidate_foods)
-                self.assertEqual(row['winner_participant'], 'candidate' if side == 'A' else 'reference')
+                self.assertEqual(
+                    row['events']['candidate']['wrong_digits'], 3 + offset
+                )
+                self.assertEqual(
+                    row['events']['candidate']['pickups'], 5 + offset
+                )
+                self.assertEqual(
+                    row['events']['candidate']['wall_hits'], 7 + offset
+                )
+                self.assertEqual(
+                    row['events']['reference']['correct_foods'],
+                    3 - candidate_foods,
+                )
+                self.assertEqual(
+                    row['winner_participant'],
+                    'candidate' if side == 'A' else 'reference',
+                )
                 self.assertEqual(row['scores'], {'A': 10, 'B': 3})
                 self.assertEqual(row['turns'], 12)
                 self.assertEqual(row['participants'][side], 'candidate')
@@ -96,58 +114,102 @@ class BenchmarkTests(unittest.TestCase):
         previous = dict(bot_weights.ACTIVE_WEIGHTS)
         bot_weights.ACTIVE_WEIGHTS['extra_state'] = 42
         expected = dict(bot_weights.ACTIVE_WEIGHTS)
-        self.addCleanup(lambda: (bot_weights.ACTIVE_WEIGHTS.clear(), bot_weights.ACTIVE_WEIGHTS.update(previous)))
+        self.addCleanup(
+            lambda: (
+                bot_weights.ACTIVE_WEIGHTS.clear(),
+                bot_weights.ACTIVE_WEIGHTS.update(previous),
+            )
+        )
         identity = bot_weights.ACTIVE_WEIGHTS
+
         def simulate(**kwargs):
             bot_weights.set_active_weights(kwargs['weights_by_side']['A'])
             return result()
-        with patch.object(benchmark, 'simulate_game', side_effect=simulate) as mock:
+
+        with patch.object(
+            benchmark, 'simulate_game', side_effect=simulate
+        ) as mock:
             report = self.run_benchmark(turns=20)
         self.assertIs(bot_weights.ACTIVE_WEIGHTS, identity)
         self.assertEqual(identity, expected)
-        self.assertEqual([(c.kwargs['seed'], c.kwargs['candidate_side']) for c in mock.call_args_list],
-                         [(17, 'A'), (17, 'B'), (18, 'A'), (18, 'B')]*2)
+        self.assertEqual(
+            [
+                (c.kwargs['seed'], c.kwargs['candidate_side'])
+                for c in mock.call_args_list
+            ],
+            [(17, 'A'), (17, 'B'), (18, 'A'), (18, 'B')] * 2,
+        )
         for call in mock.call_args_list:
             side = call.kwargs['candidate_side']
-            self.assertEqual(call.kwargs['weights_by_side'][side]['food_base_value'], 12)
-            self.assertEqual(call.kwargs['weights_by_side']['B' if side == 'A' else 'A'], bot_weights.DEFAULT_WEIGHTS)
+            self.assertEqual(
+                call.kwargs['weights_by_side'][side]['food_base_value'], 12
+            )
+            self.assertEqual(
+                call.kwargs['weights_by_side']['B' if side == 'A' else 'A'],
+                bot_weights.DEFAULT_WEIGHTS,
+            )
             self.assertEqual(call.kwargs['max_turns'], 20)
         self.assertEqual(report['summary']['total'], 8)
 
-    def test_failure_restores_global_and_does_not_write_report_or_weights(self):
+    def test_failure_restores_global_and_does_not_write_report_or_weights(
+        self,
+    ):
         previous = dict(bot_weights.ACTIVE_WEIGHTS)
         before = (self.reference.read_bytes(), self.candidate.read_bytes())
+
         def fail(**kwargs):
             bot_weights.ACTIVE_WEIGHTS.clear()
             raise RuntimeError('simulation failed')
+
         with patch.object(benchmark, 'simulate_game', side_effect=fail):
             with self.assertRaises(RuntimeError):
                 self.run_benchmark()
         self.assertEqual(bot_weights.ACTIVE_WEIGHTS, previous)
         self.assertFalse(self.output.exists())
-        self.assertEqual(before, (self.reference.read_bytes(), self.candidate.read_bytes()))
+        self.assertEqual(
+            before, (self.reference.read_bytes(), self.candidate.read_bytes())
+        )
 
     def test_manifest_and_json_roundtrip_no_unknown_values(self):
         before = (self.reference.read_bytes(), self.candidate.read_bytes())
-        with patch.object(benchmark, 'simulate_game', return_value=result()), \
-                patch.object(benchmark, 'git_snapshot', return_value={'commit': None, 'dirty': None}):
+        with (
+            patch.object(benchmark, 'simulate_game', return_value=result()),
+            patch.object(
+                benchmark,
+                'git_snapshot',
+                return_value={'commit': None, 'dirty': None},
+            ),
+        ):
             report = self.run_benchmark()
-        self.assertEqual(json.loads(self.output.read_text(encoding='utf-8')), report)
+        self.assertEqual(
+            json.loads(self.output.read_text(encoding='utf-8')), report
+        )
         self.assertEqual(set(report), {'manifest', 'summary', 'games'})
         manifest = report['manifest']
-        self.assertIsNotNone(datetime.fromisoformat(manifest['created_at']).tzinfo)
+        self.assertIsNotNone(
+            datetime.fromisoformat(manifest['created_at']).tzinfo
+        )
         self.assertTrue(manifest['python_version'])
         self.assertTrue(manifest['platform'])
         self.assertEqual(manifest['seeds'], [17, 18])
         config = manifest['configurations']['candidate']
         self.assertEqual(config['ignored_key_count'], 1)
-        self.assertEqual(set(config['effective_weights']), set(bot_weights.DEFAULT_WEIGHTS))
-        self.assertEqual(config['effective_sha256'], benchmark.canonical_hash(config['effective_weights']))
+        self.assertEqual(
+            set(config['effective_weights']), set(bot_weights.DEFAULT_WEIGHTS)
+        )
+        self.assertEqual(
+            config['effective_sha256'],
+            benchmark.canonical_hash(config['effective_weights']),
+        )
         self.assertEqual(len(config['source_sha256']), 64)
         self.assertIn('tools/benchmark_bot.py', manifest['source_sha256'])
-        self.assertEqual(len(manifest['source_sha256']['tools/bot_lab.py']), 64)
+        self.assertEqual(
+            len(manifest['source_sha256']['tools/bot_lab.py']), 64
+        )
         self.assertNotIn('PRIVATE', json.dumps(report))
-        self.assertEqual(before, (self.reference.read_bytes(), self.candidate.read_bytes()))
+        self.assertEqual(
+            before, (self.reference.read_bytes(), self.candidate.read_bytes())
+        )
 
     def test_configuration_hash_depends_on_effective_integer_values(self):
         one = benchmark.load_configuration(self.candidate)
@@ -157,7 +219,12 @@ class BenchmarkTests(unittest.TestCase):
         self.assertNotEqual(one['source_sha256'], two['source_sha256'])
 
     def test_invalid_configurations_do_not_echo_raw_values(self):
-        for content in ('[]', '{"food_base_value":"PRIVATE"}', '{broken PRIVATE', '{"food_base_value":null}'):
+        for content in (
+            '[]',
+            '{"food_base_value":"PRIVATE"}',
+            '{broken PRIVATE',
+            '{"food_base_value":null}',
+        ):
             self.candidate.write_text(content, encoding='utf-8')
             with self.assertRaises(ValueError) as caught:
                 benchmark.load_configuration(self.candidate)
@@ -264,16 +331,36 @@ class BenchmarkTests(unittest.TestCase):
                 self.assertEqual(benchmark.git_snapshot(), {'commit': 'abc123', 'dirty': dirty})
 
     def test_cli_requires_explicit_inputs_counts_and_output(self):
-        args = ['--reference', str(self.reference), '--candidate', str(self.candidate),
-                '--seeds', '2', '--seed', '17', '--repetitions', '1', '--output', str(self.output)]
+        args = [
+            '--reference',
+            str(self.reference),
+            '--candidate',
+            str(self.candidate),
+            '--seeds',
+            '2',
+            '--seed',
+            '17',
+            '--repetitions',
+            '1',
+            '--output',
+            str(self.output),
+        ]
         for index in range(0, len(args), 2):
-            with contextlib.redirect_stderr(io.StringIO()), self.assertRaises(SystemExit):
-                benchmark.main(args[:index] + args[index+2:])
-        with patch.object(benchmark, 'simulate_game', return_value=result()), \
-                contextlib.redirect_stdout(io.StringIO()) as stdout:
+            with (
+                contextlib.redirect_stderr(io.StringIO()),
+                self.assertRaises(SystemExit),
+            ):
+                after_option = index + 2
+                benchmark.main(args[:index] + args[after_option:])
+        with (
+            patch.object(benchmark, 'simulate_game', return_value=result()),
+            contextlib.redirect_stdout(io.StringIO()) as stdout,
+        ):
             benchmark.main(args)
         self.assertLessEqual(len(stdout.getvalue().splitlines()), 2)
-        self.assertEqual(json.loads(self.output.read_text())['summary']['total'], 4)
+        self.assertEqual(
+            json.loads(self.output.read_text())['summary']['total'], 4
+        )
 
 
 if __name__ == '__main__':

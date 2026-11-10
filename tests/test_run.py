@@ -16,7 +16,15 @@ from snake_bot.food_planner import (
 )
 from snake_bot.move_search import rank_deep_moves
 from snake_bot.search_engine import IterativeSearchEngine
-from snake_bot.snake_state import GameState, apply_move, legal_moves, parse_state, shrink_wall, temporal_shortest_path, track_snake
+from snake_bot.snake_state import (
+    GameState,
+    apply_move,
+    legal_moves,
+    parse_state,
+    shrink_wall,
+    temporal_shortest_path,
+    track_snake,
+)
 
 
 class FakeWebSocket:
@@ -54,8 +62,10 @@ def turn(board, side='A', score_1=0, score_2=0, remaining=250, game_id='g_1', **
 class HistoryTestCase(unittest.TestCase):
     def setUp(self):
         run.HISTORY.clear()
+        run.LOGGED_META.clear()
         run.BOT = run.SnakeBrain()
         self.addCleanup(run.HISTORY.clear)
+        self.addCleanup(run.LOGGED_META.clear)
 
 
 class InTempDirTestCase(HistoryTestCase):
@@ -70,6 +80,7 @@ class InTempDirTestCase(HistoryTestCase):
     def read_log(self, game_id):
         with open(os.path.join(self.tmpdir.name, 'games', f"game_{game_id}.log")) as f:
             return f.read()
+
 
 class TestProtocol(InTempDirTestCase, unittest.IsolatedAsyncioTestCase):
     async def test_configured_websocket_challenge(self):
@@ -247,7 +258,10 @@ class TestProtocol(InTempDirTestCase, unittest.IsolatedAsyncioTestCase):
     async def test_your_turn_sends_direction_move(self):
         websocket = FakeWebSocket()
 
-        await run.process_move(websocket, {'event': 'your_turn', 'data': turn('|A* |\n|   |\n|  B|')})
+        await run.process_move(
+            websocket,
+            {'event': 'your_turn', 'data': turn('|A* |\n|   |\n|  B|')},
+        )
 
         self.assertEqual(websocket.sent[0]['action'], 'move')
         self.assertEqual(websocket.sent[0]['data']['direction'], 'right')
@@ -259,16 +273,24 @@ class TestProtocol(InTempDirTestCase, unittest.IsolatedAsyncioTestCase):
         self.assertEqual(snapshot['turn_data']['board'], '|A* |\n|   |\n|  B|')
 
     async def test_full_match_is_logged_in_order(self):
-        websocket = FakeWebSocket([
-            {'event': 'challenge', 'data': {'challenge_id': 'c_1'}},
-            {'event': 'your_turn', 'data': turn('|A* |\n|   |\n|  B|')},
-            {'event': 'game_over', 'data': {'game_id': 'g_1'}},
-        ])
+        websocket = FakeWebSocket(
+            [
+                {'event': 'challenge', 'data': {'challenge_id': 'c_1'}},
+                {'event': 'your_turn', 'data': turn('|A* |\n|   |\n|  B|')},
+                {'event': 'game_over', 'data': {'game_id': 'g_1'}},
+            ]
+        )
 
         await run.play(websocket)
 
-        self.assertEqual([item['action'] for item in websocket.sent], ['accept_challenge', 'move'])
-        self.assertEqual([line[0] for line in self.read_log('g_1').splitlines()], ['=', '<', '?', '>', '<'])
+        self.assertEqual(
+            [item['action'] for item in websocket.sent],
+            ['accept_challenge', 'move'],
+        )
+        self.assertEqual(
+            [line[0] for line in self.read_log('g_1').splitlines()],
+            ['=', '<', '?', '>', '<'],
+        )
 
     async def test_game_log_includes_bot_version_metadata(self):
         websocket = FakeWebSocket([
@@ -285,14 +307,18 @@ class TestProtocol(InTempDirTestCase, unittest.IsolatedAsyncioTestCase):
         self.assertEqual(metadata['version'], run.BOT_VERSION)
 
     async def test_game_log_includes_decision_debug(self):
-        websocket = FakeWebSocket([
-            {'event': 'your_turn', 'data': turn('|A* |\n|   |\n|  B|')},
-            {'event': 'game_over', 'data': {'game_id': 'g_1'}},
-        ])
+        websocket = FakeWebSocket(
+            [
+                {'event': 'your_turn', 'data': turn('|A* |\n|   |\n|  B|')},
+                {'event': 'game_over', 'data': {'game_id': 'g_1'}},
+            ]
+        )
 
         await run.play(websocket)
 
-        debug_line = next(line for line in self.read_log('g_1').splitlines() if line.startswith('? '))
+        debug_line = next(
+            line for line in self.read_log('g_1').splitlines() if line.startswith('? ')
+        )
         debug = json.loads(debug_line[2:])
         self.assertEqual(debug['event'], 'decision_debug')
         self.assertEqual(debug['direction'], 'right')
@@ -645,12 +671,7 @@ class TestFoodFirstBrain(HistoryTestCase):
         self.assertEqual(self.choose(board), 'right')
 
     def test_food_inside_enclosure_can_continue_by_crashing(self):
-        board = (
-            '|aaaaa|\n'
-            '|aA*aa|\n'
-            '|a aaa|\n'
-            '|B    |'
-        )
+        board = '|aaaaa|\n' '|aA*aa|\n' '|a aaa|\n' '|B    |'
 
         state = replace(parse_state(turn(board)), crashed_a=False, crashed_b=False)
         after_food = apply_move(state, 'right', 'A')
@@ -661,7 +682,9 @@ class TestFoodFirstBrain(HistoryTestCase):
         self.assertEqual(len(after_crash.body('A')), 3)
         self.assertFalse(after_crash.is_terminal())
         analyses = rank_deep_moves(state, 'A', legal_moves(state, 'A'), search_time_ms=10)
-        self.assertFalse(next(item for item in analyses if item['direction'] == 'right')['forced_loss'])
+        self.assertFalse(
+            next(item for item in analyses if item['direction'] == 'right')['forced_loss']
+        )
 
     def test_food_path_accounts_for_own_tail_moving(self):
         board = (

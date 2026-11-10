@@ -1,4 +1,5 @@
 """Accumulative v8/v9 rule contracts, independent of strategy weights."""
+
 from dataclasses import replace
 import unittest
 
@@ -123,17 +124,34 @@ class ShootRulesTests(unittest.TestCase):
     def test_cost_and_stationary_turn_for_hit_miss_and_invalid_score(self):
         for score, hit in ((5000, True), (6000, False), (4999, True)):
             with self.subTest(score=score, hit=hit):
-                body = ((5, 9), (5, 10), (5, 11)) if hit else ((10, 9), (10, 10))
-                source = state(snakes={'A': ((5, 5), (5, 4)), 'B': body},
-                               scores={'A': score, 'B': 123}, crashed_b=False)
+                body = (
+                    ((5, 9), (5, 10), (5, 11)) if hit else ((10, 9), (10, 10))
+                )
+                source = state(
+                    snakes={'A': ((5, 5), (5, 4)), 'B': body},
+                    scores={'A': score, 'B': 123},
+                    crashed_b=False,
+                )
                 after = self.shoot(source)
                 self.assertEqual(after.body('A'), source.body('A'))
-                self.assertEqual(after.scores, {'A': score - (5000 if score >= 5000 else 500), 'B': 123})
-                self.assertEqual(after.remaining_moves, source.remaining_moves - 1)
+                self.assertEqual(
+                    after.scores,
+                    {'A': score - (5000 if score >= 5000 else 500), 'B': 123},
+                )
+                self.assertEqual(
+                    after.remaining_moves, source.remaining_moves - 1
+                )
                 self.assertEqual((after.side, after.enemy), ('B', 'A'))
-                self.assertEqual((after.crashed_a, after.crashed_b), (False, False))
-                self.assertEqual(after.last_action['shoot_cost'], 5000 if score >= 5000 else 0)
-                self.assertEqual(after.last_action['hit'], hit and score >= 5000)
+                self.assertEqual(
+                    (after.crashed_a, after.crashed_b), (False, False)
+                )
+                self.assertEqual(
+                    after.last_action['shoot_cost'],
+                    5000 if score >= 5000 else 0,
+                )
+                self.assertEqual(
+                    after.last_action['hit'], hit and score >= 5000
+                )
                 if score < 5000:
                     self.assertEqual(after.body('B'), body)
                     self.assertFalse(after.shot_food)
@@ -186,17 +204,28 @@ class ShootRulesTests(unittest.TestCase):
                 self.assertFalse(after.last_action['hit'])
                 self.assertEqual(after.scores['A'], 0)
 
-    def test_shot_food_is_edible_by_both_players_without_advancing_numeric_sequence(self):
+    def test_shot_food_is_edible_by_both_players_without_advancing_numeric_sequence(
+        self,
+    ):
         for side in ('A', 'B'):
             with self.subTest(side=side):
-                source = state(side=side, enemy='B' if side == 'A' else 'A',
-                               snakes={'A': ((5, 5), (5, 4)), 'B': ((10, 5), (10, 4))},
-                               multipliers={'A': 2, 'B': 3},
-                               shot_food=frozenset({(5, 6), (10, 6)}),
-                               food=frozenset({(0, 0)}), food_values={(0, 0): 1}, next_food_digit=1)
+                source = state(
+                    side=side,
+                    enemy='B' if side == 'A' else 'A',
+                    snakes={'A': ((5, 5), (5, 4)), 'B': ((10, 5), (10, 4))},
+                    multipliers={'A': 2, 'B': 3},
+                    shot_food=frozenset({(5, 6), (10, 6)}),
+                    food=frozenset({(0, 0)}),
+                    food_values={(0, 0): 1},
+                    next_food_digit=1,
+                )
                 after = apply_move(source, 'right', side)
-                self.assertEqual(len(after.body(side)), len(source.body(side)) + 1)
-                self.assertEqual(after.scores[side], 100 + 100 * source.multipliers[side])
+                self.assertEqual(
+                    len(after.body(side)), len(source.body(side)) + 1
+                )
+                self.assertEqual(
+                    after.scores[side], 100 + 100 * source.multipliers[side]
+                )
                 self.assertNotIn(after.head(side), after.shot_food)
                 self.assertEqual(after.next_food_digit, 1)
                 self.assertEqual(after.food_values, source.food_values)

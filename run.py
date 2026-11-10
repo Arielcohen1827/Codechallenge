@@ -1,3 +1,5 @@
+"""WebSocket entry point, redacted logging and per-match decision dispatch."""
+
 import asyncio
 import json
 import os
@@ -12,11 +14,16 @@ except ModuleNotFoundError:
 
 from snake_bot.bot_version import BOT_VERSION, BOT_VERSION_NOTES
 from snake_bot.bot_weights import load_active_weights
-from snake_bot.food_planner import choose_food_plan
-from snake_bot.snake_brain import SnakeBrain, final_safe_direction
-from snake_bot.snake_state import apply_move, legal_moves, parse_state, step
+from snake_bot import snake_brain as _brain
+from snake_bot import snake_state as _state
+from snake_bot.snake_brain import SnakeBrain
+from snake_bot.snake_state import parse_state
 from v7_logging import safe_message, safe_data, verification_record
 
+# Compatibility exports for clients that import the launcher.
+final_safe_direction = _brain.final_safe_direction
+apply_move = _state.apply_move
+legal_moves = _state.legal_moves
 
 # A running text log of events received / actions sent per game, written to
 # games/game_<game_id>.log when the match ends.
@@ -42,10 +49,14 @@ ALLOWED_CHALLENGE_OPPONENTS = frozenset(
 )
 OUTGOING_CHALLENGE_TARGET = os.getenv('OUTGOING_CHALLENGE_TARGET', '').strip()
 OUTGOING_CHALLENGE_GAME = os.getenv('OUTGOING_CHALLENGE_GAME', 'snake').strip()
-INCOMING_CHALLENGE_EXPECTED_OPPONENT = os.getenv(
-    'INCOMING_CHALLENGE_EXPECTED_OPPONENT',
-    '',
-).strip().lower()
+INCOMING_CHALLENGE_EXPECTED_OPPONENT = (
+    os.getenv(
+        'INCOMING_CHALLENGE_EXPECTED_OPPONENT',
+        '',
+    )
+    .strip()
+    .lower()
+)
 try:
     DUPLICATE_ACCEPT_COUNT = max(
         1,
@@ -53,10 +64,14 @@ try:
     )
 except ValueError:
     DUPLICATE_ACCEPT_COUNT = 1
-DUPLICATE_ACCEPT_OPPONENT = os.getenv(
-    'DUPLICATE_ACCEPT_OPPONENT',
-    '',
-).strip().lower()
+DUPLICATE_ACCEPT_OPPONENT = (
+    os.getenv(
+        'DUPLICATE_ACCEPT_OPPONENT',
+        '',
+    )
+    .strip()
+    .lower()
+)
 DUPLICATE_ACCEPT_ONCE = os.getenv(
     'DUPLICATE_ACCEPT_ONCE',
     '0',
@@ -102,32 +117,53 @@ def diagnostic_call(function, *args, **kwargs):
         return None
 
 
-def log_verification(game_id, data, direction=None, finished=False, debug=None, action_type='move'):
+def log_verification(
+    game_id, data, direction=None, finished=False, debug=None, action_type='move'
+):
+    """Attach observational reconciliation and an optional sent-action prediction."""
     try:
-        previous = None
-        for line in reversed(HISTORY.get(game_id, ())):
-            if line.startswith('? ') or line.startswith('< '):
-                previous = json.loads(line[2:]).get('verification')
-                if previous:
-                    break
-        record = verification_record(data, BOT.observed_states.get(str(game_id)),
-                                     previous, direction, finished, action_type=action_type)
+        record = verification_record(
+            data,
+            BOT.observed_states.get(str(game_id)),
+            previous_verification(game_id),
+            direction,
+            finished,
+            action_type=action_type,
+        )
         if finished:
-            # Attach to the existing event to preserve the protocol log order.
-            last_line = HISTORY[game_id][-1]
-            event = json.loads(last_line[2:])
-            if not last_line.startswith('< ') or event.get('event') != 'game_over':
-                return
-            event['verification'] = record
-            HISTORY[game_id][-1] = '< ' + json.dumps(event)
+            attach_finished_verification(game_id, record)
         else:
-            log_debug(game_id, {**(debug or {'event': 'decision_debug'}), 'verification': record})
+            log_debug(
+                game_id,
+                {
+                    **(debug or {'event': 'decision_debug'}),
+                    'verification': record,
+                },
+            )
     except Exception:
         # Incomplete diagnostics must never affect sending or brain cleanup.
         pass
 
 
+def previous_verification(game_id):
+    for line in reversed(HISTORY.get(game_id, ())):
+        if line.startswith(('? ', '< ')):
+            record = json.loads(line[2:]).get('verification')
+            if record:
+                return record
+    return None
+
+
+def attach_finished_verification(game_id, record):
+    last_line = HISTORY[game_id][-1]
+    event = json.loads(last_line[2:])
+    if last_line.startswith('< ') and event.get('event') == 'game_over':
+        event['verification'] = record
+        HISTORY[game_id][-1] = '< ' + json.dumps(event)
+
+
 def write_game_log(game_id):
+    """Persist the completed match's redacted event history."""
     try:
         LOG_DIR.mkdir(parents=True, exist_ok=True)
         path = LOG_DIR / f"game_{game_id}.log"
@@ -138,53 +174,80 @@ def write_game_log(game_id):
         print_diagnostic(f"could not write game log: {type(e).__name__}")
 
 
-def write_live_snapshot(game_id, data, status='playing', decision=None, direction=None, action_type='move'):
+def write_live_snapshot(
+    game_id,
+    data,
+    status='playing',
+    decision=None,
+    direction=None,
+    action_type='move',
+):
     """Publish the latest server board for the local live viewer."""
     try:
         LIVE_DIR.mkdir(parents=True, exist_ok=True)
-        safe_id = ''.join(ch for ch in str(game_id) if ch.isalnum() or ch in '-_')
+        safe_id = snapshot_id(game_id)
         if not safe_id:
             return
-        now = time.time()
-        started_at = LIVE_STARTED_AT.setdefault(game_id, now)
-        board = str(data.get('board', ''))
-        current_food_counts = {
-            'A': max(0, sum(char in ('A', 'a') for char in board) - INITIAL_SNAKE_LENGTH),
-            'B': max(0, sum(char in ('B', 'b') for char in board) - INITIAL_SNAKE_LENGTH),
-        }
-        previous_food_counts = LIVE_FOOD_COUNTS.get(game_id, {})
-        food_counts = {
-            side: max(current_food_counts[side], previous_food_counts.get(side, 0))
-            for side in ('A', 'B')
-        }
-        LIVE_FOOD_COUNTS[game_id] = food_counts
-        turn_number = sum(
-            1
-            for line in HISTORY.get(game_id, ())
-            if line.startswith('< ') and '"event": "your_turn"' in line
-        )
-        payload = {
-            'game_id': str(game_id),
-            'status': status,
-            'started_at': started_at,
-            'updated_at': now,
-            'turn_number': turn_number,
-            'food_eaten': food_counts,
-            'bot_version': BOT_VERSION,
-            'turn_data': safe_data(data),
-            'decision': safe_message(decision) if decision else None,
-            'direction': direction,
-            'action_type': action_type,
-        }
+        payload = snapshot_payload(game_id, data, status, decision)
+        payload.update(direction=direction, action_type=action_type)
         path = LIVE_DIR / f'game_{safe_id}.json'
         temporary = path.with_suffix('.tmp')
         temporary.write_text(json.dumps(payload), encoding='utf-8')
         temporary.replace(path)
-    except Exception as e:
-        print_diagnostic(f"could not write live snapshot: {type(e).__name__}")
+    except Exception as error:
+        print_diagnostic(f"could not write live snapshot: {type(error).__name__}")
+
+
+def snapshot_id(game_id):
+    return ''.join(char for char in str(game_id) if char.isalnum() or char in '-_')
+
+
+def snapshot_payload(game_id, data, status, decision):
+    now = time.time()
+    started_at = LIVE_STARTED_AT.setdefault(game_id, now)
+    return {
+        'game_id': str(game_id),
+        'status': status,
+        'started_at': started_at,
+        'updated_at': now,
+        'turn_number': snapshot_turn_number(game_id),
+        'food_eaten': visible_food_counts(game_id, data),
+        'bot_version': BOT_VERSION,
+        'turn_data': safe_data(data),
+        'decision': safe_message(decision) if decision else None,
+    }
+
+
+def visible_food_counts(game_id, data):
+    """Partial body visibility cannot establish a snake's total growth."""
+    if data.get('levels', 1) > 1:
+        return {'A': None, 'B': None}
+    return snapshot_food_counts(game_id, str(data.get('board', '')))
+
+
+def snapshot_food_counts(game_id, board):
+    previous = LIVE_FOOD_COUNTS.get(game_id, {})
+    counts = {
+        side: max(previous.get(side, 0), snapshot_growth(board, side)) for side in ('A', 'B')
+    }
+    LIVE_FOOD_COUNTS[game_id] = counts
+    return counts
+
+
+def snapshot_growth(board, side):
+    return max(0, board.count(side) + board.count(side.lower()) - INITIAL_SNAKE_LENGTH)
+
+
+def snapshot_turn_number(game_id):
+    return sum(
+        1
+        for line in HISTORY.get(game_id, ())
+        if line.startswith('< ') and '"event": "your_turn"' in line
+    )
 
 
 async def send(websocket, action, data):
+    """Send one protocol action while redacting its diagnostic copy."""
     message = json.dumps(
         {
             'action': action,
@@ -217,18 +280,17 @@ async def send_configured_challenge(websocket):
 
 
 async def start(auth_token):
+    """Authenticate the client and reconnect after recoverable connection failures."""
     if websockets is None:
         raise RuntimeError("websockets is required to connect to the server")
     uri = "wss://server.codechallenge.net.ar/ws?token={}".format(auth_token)
-    # uri = "ws://localhost:5000/ws?token={}".format(auth_token)
     outgoing_challenge_sent = False
     while True:
         try:
             print_diagnostic('connection to wss://server.codechallenge.net.ar/ws')
             async with websockets.connect(uri) as websocket:
                 print_diagnostic('connection READY!')
-                if not outgoing_challenge_sent:
-                    outgoing_challenge_sent = await send_configured_challenge(websocket)
+                outgoing_challenge_sent = await challenge_once(websocket, outgoing_challenge_sent)
                 await play(websocket)
         except KeyboardInterrupt:
             print_diagnostic('Exiting...')
@@ -238,14 +300,22 @@ async def start(auth_token):
             time.sleep(3)
 
 
+async def challenge_once(websocket, already_sent):
+    if already_sent:
+        return True
+    return await send_configured_challenge(websocket)
+
+
 async def on_game_over(websocket, request_data):
+    """Store the final observation and release this match's runtime memory."""
     game_id = request_data['data'].get('game_id')
     if game_id:
         try:
             diagnostic_call(log_event, game_id, request_data)
             log_verification(game_id, request_data['data'], finished=True)
             decision = BOT.decision_debug(game_id)
-            diagnostic_call(write_live_snapshot,
+            diagnostic_call(
+                write_live_snapshot,
                 game_id,
                 request_data['data'],
                 status='finished',
@@ -280,73 +350,93 @@ def is_tournament_challenge(data):
 
 
 async def on_challenge(websocket, request_data):
-    global DUPLICATE_ACCEPT_USED
-
+    """Apply the configured acceptance policy to an incoming challenge."""
     data = request_data['data']
     challenge_id = data['challenge_id']
     opponent = str(data.get('opponent', 'desconocido'))
-    normalized_opponent = opponent.strip().lower()
-    tournament = is_tournament_challenge(data)
-    reason = 'tournament' if tournament else 'any opponent'
+    reason = 'tournament' if is_tournament_challenge(data) else 'any opponent'
     print_diagnostic(
         f"incoming challenge accepted by policy: {challenge_id} "
         f"(opponent: {opponent}; reason: {reason})"
     )
-    duplicate_matches = (
-        not DUPLICATE_ACCEPT_OPPONENT
-        or normalized_opponent == DUPLICATE_ACCEPT_OPPONENT
-    )
-    duplicate_available = not DUPLICATE_ACCEPT_ONCE or not DUPLICATE_ACCEPT_USED
-    accept_count = (
-        DUPLICATE_ACCEPT_COUNT
-        if duplicate_matches and duplicate_available
-        else 1
-    )
-    if accept_count > 1 and DUPLICATE_ACCEPT_ONCE:
-        DUPLICATE_ACCEPT_USED = True
+    accept_count = challenge_accept_count(opponent.strip().lower())
     for attempt in range(1, accept_count + 1):
-        await send(
-            websocket,
-            'accept_challenge',
-            {
-                'challenge_id': challenge_id,
-            },
-        )
-        print_diagnostic(
-            f"challenge acceptance {attempt}/{accept_count}: "
-            f"{challenge_id}"
-        )
+        await send(websocket, 'accept_challenge', {'challenge_id': challenge_id})
+        print_diagnostic(f"challenge acceptance {attempt}/{accept_count}: {challenge_id}")
+
+
+def challenge_accept_count(opponent):
+    if DUPLICATE_ACCEPT_OPPONENT and opponent != DUPLICATE_ACCEPT_OPPONENT:
+        return 1
+    if DUPLICATE_ACCEPT_ONCE and DUPLICATE_ACCEPT_USED:
+        return 1
+    return reserve_duplicate_acceptance()
+
+
+def reserve_duplicate_acceptance():
+    global DUPLICATE_ACCEPT_USED
+    if DUPLICATE_ACCEPT_COUNT > 1 and DUPLICATE_ACCEPT_ONCE:
+        DUPLICATE_ACCEPT_USED = True
+    return DUPLICATE_ACCEPT_COUNT
 
 
 async def on_your_turn(websocket, request_data):
+    """Dispatch a server turn through the production decision path."""
     diagnostic_call(log_event, request_data['data']['game_id'], request_data)
     await process_your_turn(websocket, request_data)
 
 
 async def on_play_data(websocket, request_data):
-    """Receive observations, never a turn permission or a request to send."""
+    """Receive observations without requesting a new move."""
     raw = request_data.get('data', {})
     game_id = raw.get('game_id')
     if game_id is None:
         return
     diagnostic_call(log_event, game_id, request_data)
-    data = dict(raw)
-    for key in ('action', 'action_type', 'direction'):
-        value = request_data.get(key)
-        allowed = ('up', 'down', 'left', 'right') if key == 'direction' else ('move', 'shoot')
-        if key not in data and value in allowed:
-            data[key] = value
-    complete = (isinstance(data.get('board'), str) and data.get('side') is not None
-                and isinstance(data.get('remaining_moves'), int)
-                and all(any(isinstance(data.get(key), (int, float)) for key in keys)
-                        for keys in (('score_1', 'score_A'), ('score_2', 'score_B'))))
-    if not complete:
+    data = merge_action_fields(raw, request_data)
+    if not complete_play_data(data):
         return
     state = BOT.observe_state(data)
     log_verification(game_id, data)
     if state is not None:
-        diagnostic_call(write_live_snapshot, game_id, data,
-                        action_type=data.get('action', data.get('action_type')))
+        diagnostic_call(
+            write_live_snapshot,
+            game_id,
+            data,
+            action_type=data.get('action', data.get('action_type')),
+        )
+
+
+def merge_action_fields(raw, request):
+    """Complete missing echoed action fields using validated envelope values."""
+    data = dict(raw)
+    options = {
+        'action': ('move', 'shoot'),
+        'action_type': ('move', 'shoot'),
+        'direction': ('up', 'down', 'left', 'right', 'ascend', 'descend'),
+    }
+    for key, allowed in options.items():
+        value = request.get(key)
+        if key not in data and value in allowed:
+            data[key] = value
+    return data
+
+
+def complete_play_data(data):
+    """Require the fields needed to reconcile a server observation."""
+    return (
+        isinstance(data.get('board'), str)
+        and data.get('side') is not None
+        and isinstance(data.get('remaining_moves'), int)
+        and complete_play_scores(data)
+    )
+
+
+def complete_play_scores(data):
+    return all(
+        any(isinstance(data.get(key), (int, float)) for key in keys)
+        for keys in (('score_1', 'score_A'), ('score_2', 'score_B'))
+    )
 
 
 HANDLERS = {
@@ -367,11 +457,14 @@ def print_diagnostic(message):
 
 
 async def play(websocket):
+    """Dispatch incoming WebSocket events until the connection ends."""
     while True:
         try:
             request = await websocket.recv()
             request_data = json.loads(request)
-            diagnostic_call(lambda: print_diagnostic('< ' + json.dumps(safe_message(request_data))))
+            diagnostic_call(
+                lambda: print_diagnostic('< ' + json.dumps(safe_message(request_data)))
+            )
             handler = HANDLERS.get(request_data['event'])
             if handler:
                 await handler(websocket, request_data)
@@ -384,10 +477,12 @@ async def play(websocket):
 
 
 async def process_your_turn(websocket, request_data):
+    """Route a turn event to the shared move-or-shoot implementation."""
     await process_move(websocket, request_data)
 
 
 async def process_move(websocket, request_data):
+    """Choose, validate and send an action before recording its unconfirmed prediction."""
     data = request_data['data']
     diagnostic_call(print_diagnostic, data.get('board', ''))
     action = BOT.choose_action(data)
@@ -396,15 +491,9 @@ async def process_move(websocket, request_data):
     action = BOT.safe_action(data, action)
     if action is None:
         return
+    action = affordable_action(data, action)
     direction = action['direction']
     action_type = action['action_type']
-    # Last boundary guard also covers a future/custom safe_action policy.
-    if action_type == 'shoot':
-        state = parse_state(data)
-        if state.scores[state.side] < 5000:
-            action_type = 'move'
-            direction = BOT.safe_direction(data, direction)
-            action = {'action_type': action_type, 'direction': direction}
     debug = BOT.decision_debug(data['game_id'])
     if debug is not None:
         debug = {**debug, 'action_type': action_type, 'direction': direction}
@@ -413,7 +502,8 @@ async def process_move(websocket, request_data):
         'turn_token': data['turn_token'],
         'direction': direction,
     }
-    diagnostic_call(write_live_snapshot,
+    diagnostic_call(
+        write_live_snapshot,
         move['game_id'],
         data,
         decision=debug,
@@ -422,12 +512,29 @@ async def process_move(websocket, request_data):
     )
     await send(websocket, action_type, move)
     log_verification(move['game_id'], data, direction, debug=debug, action_type=action_type)
-    diagnostic_call(log_action, move['game_id'], {
-        'action': action_type, 'action_type': action_type, 'data': move})
+    diagnostic_call(
+        log_action,
+        move['game_id'],
+        {'action': action_type, 'action_type': action_type, 'data': move},
+    )
     BOT.commit_action(data, action)
 
 
+def affordable_action(data, action):
+    """Protect the network boundary when a custom policy proposes a shot."""
+    if action['action_type'] != 'shoot':
+        return action
+    state = parse_state(data)
+    if state.scores[state.side] >= 5000:
+        return action
+    return {
+        'action_type': 'move',
+        'direction': BOT.safe_direction(data, action['direction']),
+    }
+
+
 async def process_wall(websocket, request_data):
+    """Forward the legacy wall event through the normal action handler."""
     await send(
         websocket,
         'wall',

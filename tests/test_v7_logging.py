@@ -30,21 +30,28 @@ class LoggingTests(InTempDirTestCase, unittest.IsolatedAsyncioTestCase):
     async def test_connection_auth_remains_on_wire_only(self):
         ws = FakeWebSocket()
         uris = []
+
         class Connection:
             async def __aenter__(self):
                 return ws
+
             async def __aexit__(self, *args):
                 return False
+
         output = io.StringIO()
+
         def connect(uri):
             uris.append(uri)
             return Connection()
+
         with patch.object(run, 'websockets', SimpleNamespace(connect=connect)):
             with patch.object(run, 'play', side_effect=KeyboardInterrupt):
                 with contextlib.redirect_stdout(output):
                     await run.start('synthetic-auth')
         self.assertNotIn('synthetic-auth', output.getvalue())
-        self.assertEqual(uris, ['wss://server.codechallenge.net.ar/ws?token=synthetic-auth'])
+        self.assertEqual(
+            uris, ['wss://server.codechallenge.net.ar/ws?token=synthetic-auth']
+        )
 
     async def test_malformed_and_exception_text_is_not_echoed(self):
         ws = FakeWebSocket(['synthetic-malformed-secret'])
@@ -123,15 +130,24 @@ class LoggingTests(InTempDirTestCase, unittest.IsolatedAsyncioTestCase):
 
     async def test_connection_console_failure_does_not_block_mock_auth(self):
         ws = FakeWebSocket()
+
         class Connection:
             async def __aenter__(self):
                 return ws
+
             async def __aexit__(self, *args):
                 return False
-        with patch('builtins.print', side_effect=OSError('private')), \
-                patch.object(run, 'websockets', SimpleNamespace(connect=lambda uri: Connection())), \
-                patch.object(run, 'play', side_effect=KeyboardInterrupt), \
-                patch.object(run.time, 'sleep', side_effect=RuntimeError('retry')):
+
+        with (
+            patch('builtins.print', side_effect=OSError('private')),
+            patch.object(
+                run,
+                'websockets',
+                SimpleNamespace(connect=lambda uri: Connection()),
+            ),
+            patch.object(run, 'play', side_effect=KeyboardInterrupt),
+            patch.object(run.time, 'sleep', side_effect=RuntimeError('retry')),
+        ):
             await run.start('synthetic-auth')
 
     async def test_failed_final_event_log_does_not_rewrite_last_action(self):
@@ -149,13 +165,24 @@ class LoggingTests(InTempDirTestCase, unittest.IsolatedAsyncioTestCase):
         self.assertEqual(after['tail_origin_by_symbol'], {'\u24b6': 'B', '\u24b7': 'A'})
         self.assertEqual(after['tail_cleanup_or_consumption'], 'unknown')
 
-    def test_absent_fields_and_duplicate_stale_gaps_do_not_invent_evidence(self):
-        before = v7_logging.verification_record(turn('|AB|', remaining=20, score_1=500))
-        for horizon, transition in ((20, 'duplicate_or_correction'), (21, 'stale')):
-            after = v7_logging.verification_record(turn('|AB|', remaining=horizon), previous=before)
+    def test_absent_fields_and_duplicate_stale_gaps_do_not_invent_evidence(
+        self,
+    ):
+        before = v7_logging.verification_record(
+            turn('|AB|', remaining=20, score_1=500)
+        )
+        for horizon, transition in (
+            (20, 'duplicate_or_correction'),
+            (21, 'stale'),
+        ):
+            after = v7_logging.verification_record(
+                turn('|AB|', remaining=horizon), previous=before
+            )
             self.assertEqual(after['transition'], transition)
             self.assertEqual(after['score_deltas'], {'A': None, 'B': None})
-        after = v7_logging.verification_record({'game_id': 'g_1'}, previous=before, finished=True)
+        after = v7_logging.verification_record(
+            {'game_id': 'g_1'}, previous=before, finished=True
+        )
         self.assertIsNone(after['after']['scores']['A'])
         self.assertIsNone(after['after']['remaining_moves'])
         self.assertEqual(after['game_over_cause'], 'unknown')
@@ -172,11 +199,23 @@ class LoggingTests(InTempDirTestCase, unittest.IsolatedAsyncioTestCase):
         self.assertEqual(mismatch['after']['crashed'], {'A': None, 'B': None})
 
     def test_final_causes_remain_possible_or_ambiguous(self):
-        for extra, cause in (({'remaining_moves': 0}, 'possible_horizon_exhaustion'),
-                             ({'score_1': v7_logging.ELIMINATION_SCORE_THRESHOLD - 1}, 'possible_score_threshold'),
-                             ({'remaining_moves': 0, 'score_1': v7_logging.ELIMINATION_SCORE_THRESHOLD - 1},
-                              'ambiguous_horizon_or_score_threshold')):
-            record = v7_logging.verification_record(turn('|AB|', **extra), finished=True)
+        for extra, cause in (
+            ({'remaining_moves': 0}, 'possible_horizon_exhaustion'),
+            (
+                {'score_1': v7_logging.ELIMINATION_SCORE_THRESHOLD - 1},
+                'possible_score_threshold',
+            ),
+            (
+                {
+                    'remaining_moves': 0,
+                    'score_1': v7_logging.ELIMINATION_SCORE_THRESHOLD - 1,
+                },
+                'ambiguous_horizon_or_score_threshold',
+            ),
+        ):
+            record = v7_logging.verification_record(
+                turn('|AB|', **extra), finished=True
+            )
             self.assertEqual(record['game_over_cause'], cause)
 
     async def test_official_final_cause_preserved_without_replacing_inference(self):
@@ -191,22 +230,47 @@ class LoggingTests(InTempDirTestCase, unittest.IsolatedAsyncioTestCase):
                              {'reason': cause, 'cause': cause})
             self.assertEqual(event['verification']['game_over_cause'], 'unknown')
 
-    async def test_credential_bearing_reason_and_cause_are_redacted_in_all_sinks(self):
-        for marker in ('token', 'auth', 'secret', 'password', 'credential', 'bearer', 'api_key'):
+    async def test_credential_bearing_reason_and_cause_are_redacted_in_all_sinks(
+        self,
+    ):
+        for marker in (
+            'token',
+            'auth',
+            'secret',
+            'password',
+            'credential',
+            'bearer',
+            'api_key',
+        ):
             for field in ('reason', 'cause'):
-                self.assertEqual(v7_logging.safe_data({field: marker + '=synthetic-private'})[field],
-                                 '[redacted]')
-        self.assertEqual(v7_logging.safe_message({'reason': 'api_key=synthetic-private'})['reason'],
-                         '[redacted]')
-        for field, text in (('reason', 'invalid turn_token=synthetic-private'),
-                            ('cause', 'Bearer synthetic-private')):
+                self.assertEqual(
+                    v7_logging.safe_data(
+                        {field: marker + '=synthetic-private'}
+                    )[field],
+                    '[redacted]',
+                )
+        self.assertEqual(
+            v7_logging.safe_message({'reason': 'api_key=synthetic-private'})[
+                'reason'
+            ],
+            '[redacted]',
+        )
+        for field, text in (
+            ('reason', 'invalid turn_token=synthetic-private'),
+            ('cause', 'Bearer synthetic-private'),
+        ):
             game_id = 'redacted_' + field
-            request = {'event': 'game_over', 'data': {'game_id': game_id, field: text}}
+            request = {
+                'event': 'game_over',
+                'data': {'game_id': game_id, field: text},
+            }
             output = io.StringIO()
             with contextlib.redirect_stdout(output):
                 await run.play(FakeWebSocket([request]))
             observed = output.getvalue() + self.read_log(game_id)
-            observed += Path(f'games/live/game_{game_id}.json').read_text(encoding='utf-8')
+            observed += Path(f'games/live/game_{game_id}.json').read_text(
+                encoding='utf-8'
+            )
             self.assertNotIn('synthetic-private', observed)
             event = json.loads(run.HISTORY[game_id][-1][2:])
             self.assertEqual(event['data'][field], '[redacted]')
@@ -231,74 +295,134 @@ class LoggingTests(InTempDirTestCase, unittest.IsolatedAsyncioTestCase):
             self.assertEqual(record['after']['crashed'], {'A': None, 'B': None})
 
     def test_sent_prediction_collision_causes_and_unknown_crash_score(self):
-        for board, direction, cause in (('|A  B|', 'left', 'border'),
-                                         ('|A# B|', 'right', 'wall'),
-                                         ('|Aa B|', 'right', 'self'),
-                                         ('|AB  |', 'right', 'rival')):
+        for board, direction, cause in (
+            ('|A  B|', 'left', 'border'),
+            ('|A# B|', 'right', 'wall'),
+            ('|Aa B|', 'right', 'self'),
+            ('|AB  |', 'right', 'rival'),
+        ):
             data = turn(board, score_1=500)
-            record = v7_logging.verification_record(data, run.parse_state(data), direction=direction)
+            record = v7_logging.verification_record(
+                data, run.parse_state(data), direction=direction
+            )
             prediction = record['sent_action_prediction']
             self.assertEqual(prediction['collision_cause'], cause)
             self.assertIsNone(prediction['expected_score'])
-            self.assertEqual(prediction['source'], 'prediction_not_server_confirmation')
-            self.assertEqual(len(prediction['expected_body']), len(run.parse_state(data).body('A')))
+            self.assertEqual(
+                prediction['source'], 'prediction_not_server_confirmation'
+            )
+            self.assertEqual(
+                len(prediction['expected_body']),
+                len(run.parse_state(data).body('A')),
+            )
 
     def test_prediction_tail_reward_and_released_tail_growth_nuance(self):
         data = turn('|A\u24b6 B|', score_1=100, multiplier_1=2)
         state = run.parse_state(data)
         record = v7_logging.verification_record(data, state, direction='right')
         prediction = record['sent_action_prediction']
-        self.assertEqual(prediction['tail_interaction'],
-                         {'symbol': '\u24b6', 'beneficiary': 'A', 'originator': 'B', 'event': 'consume'})
-        self.assertEqual(prediction['expected_score'], run.apply_move(state, 'right').scores['A'])
+        self.assertEqual(
+            prediction['tail_interaction'],
+            {
+                'symbol': '\u24b6',
+                'beneficiary': 'A',
+                'originator': 'B',
+                'event': 'consume',
+            },
+        )
+        self.assertEqual(
+            prediction['expected_score'],
+            run.apply_move(state, 'right').scores['A'],
+        )
         from dataclasses import replace
+
         data = turn('|AaB|\n|aa |', score_1=0)
-        state = replace(run.parse_state(data), snakes={'A': ((0, 0), (1, 0), (1, 1), (0, 1)),
-                                                       'B': ((0, 2),)})
+        state = replace(
+            run.parse_state(data),
+            snakes={'A': ((0, 0), (1, 0), (1, 1), (0, 1)), 'B': ((0, 2),)},
+        )
         record = v7_logging.verification_record(data, state, direction='right')
         self.assertIsNone(record['sent_action_prediction']['collision_cause'])
         growing = replace(state, food=frozenset({(0, 1)}))
-        record = v7_logging.verification_record(data, growing, direction='right')
-        self.assertEqual(record['sent_action_prediction']['collision_cause'], 'self')
+        record = v7_logging.verification_record(
+            data, growing, direction='right'
+        )
+        self.assertEqual(
+            record['sent_action_prediction']['collision_cause'], 'self'
+        )
 
-    def test_prediction_reconciliation_requires_single_action_and_explicit_fields(self):
+    def test_prediction_reconciliation_requires_single_action_and_explicit_fields(
+        self,
+    ):
         data = turn('|A  B|', remaining=20, score_1=100)
         state = run.parse_state(data)
         before = v7_logging.verification_record(data, state, direction='right')
         before = json.loads(json.dumps(before))
-        after = v7_logging.verification_record(turn('| A B|', side='B', remaining=19, score_1=101), previous=before)
-        self.assertEqual(after['prediction_reconciliation'], 'consistent_body_and_score_only')
-        gap = v7_logging.verification_record(turn('| A B|', remaining=18, score_1=101), previous=before)
+        after = v7_logging.verification_record(
+            turn('| A B|', side='B', remaining=19, score_1=101),
+            previous=before,
+        )
+        self.assertEqual(
+            after['prediction_reconciliation'],
+            'consistent_body_and_score_only',
+        )
+        gap = v7_logging.verification_record(
+            turn('| A B|', remaining=18, score_1=101), previous=before
+        )
         self.assertEqual(gap['prediction_reconciliation'], 'unavailable')
 
     def test_known_crash_prediction_and_unmatched_single_action(self):
         data = turn('|A  B|', remaining=20, score_1=500)
         state = run.parse_state(data, crash_history={'A': True})
         before = v7_logging.verification_record(data, state, direction='left')
-        self.assertEqual(before['sent_action_prediction']['expected_score'],
-                         run.apply_move(state, 'left').scores['A'])
-        after = v7_logging.verification_record(turn('|A  B|', side='B', remaining=19, score_1=1), previous=before)
-        self.assertEqual(after['prediction_reconciliation'], 'differs_body_or_score')
+        self.assertEqual(
+            before['sent_action_prediction']['expected_score'],
+            run.apply_move(state, 'left').scores['A'],
+        )
+        after = v7_logging.verification_record(
+            turn('|A  B|', side='B', remaining=19, score_1=1), previous=before
+        )
+        self.assertEqual(
+            after['prediction_reconciliation'], 'differs_body_or_score'
+        )
         self.assertEqual(after['crash_cause']['A'], 'unknown')
 
     def test_reconciliation_checks_head_marker_and_explicit_next_side(self):
         data = turn('|Aa B|\n|    |', remaining=20, score_1=100)
         state = run.parse_state(data)
-        before = json.loads(json.dumps(v7_logging.verification_record(data, state, direction='down')))
+        before = json.loads(
+            json.dumps(
+                v7_logging.verification_record(data, state, direction='down')
+            )
+        )
         for board, side in (('|A  B|\n|a   |', 'B'), ('|a  B|\n|A   |', 'A')):
-            after = v7_logging.verification_record(turn(board, side=side, remaining=19, score_1=101),
-                                                   previous=before)
-            self.assertEqual(after['prediction_reconciliation'], 'differs_head_or_side')
+            after = v7_logging.verification_record(
+                turn(board, side=side, remaining=19, score_1=101),
+                previous=before,
+            )
+            self.assertEqual(
+                after['prediction_reconciliation'], 'differs_head_or_side'
+            )
 
     def test_prediction_reports_detached_tail_cells_and_beneficiary(self):
-        for side, board, symbol, beneficiary in (('A', '|Aaaa B|', '\u24b7', 'B'),
-                                                ('B', '|Bbbb A|', '\u24b6', 'A')):
+        for side, board, symbol, beneficiary in (
+            ('A', '|Aaaa B|', '\u24b7', 'B'),
+            ('B', '|Bbbb A|', '\u24b6', 'A'),
+        ):
             data = turn(board, side=side, remaining=20)
             state = run.parse_state(data)
-            prediction = v7_logging.verification_record(data, state, direction='left')['sent_action_prediction']
-            self.assertEqual(prediction['expected_detached_tail'],
-                             {'cells': [[0, 3]], 'symbol': symbol,
-                              'beneficiary': beneficiary, 'originator': side})
+            prediction = v7_logging.verification_record(
+                data, state, direction='left'
+            )['sent_action_prediction']
+            self.assertEqual(
+                prediction['expected_detached_tail'],
+                {
+                    'cells': [[0, 3]],
+                    'symbol': symbol,
+                    'beneficiary': beneficiary,
+                    'originator': side,
+                },
+            )
             self.assertEqual(len(prediction['expected_body']), 3)
 
     def test_reward_prediction_requires_matching_supplied_multiplier(self):
@@ -306,7 +430,9 @@ class LoggingTests(InTempDirTestCase, unittest.IsolatedAsyncioTestCase):
             data = turn(board, remaining=20, score_1=100, multiplier_1=2)
             state = run.parse_state(data)
             changed = dict(data, multiplier_1=3)
-            prediction = v7_logging.verification_record(changed, state, direction='right')['sent_action_prediction']
+            prediction = v7_logging.verification_record(
+                changed, state, direction='right'
+            )['sent_action_prediction']
             self.assertIsNone(prediction['expected_score'])
 
     def test_windows_print_fallback_and_utf8_log(self):
@@ -314,7 +440,17 @@ class LoggingTests(InTempDirTestCase, unittest.IsolatedAsyncioTestCase):
         with patch.object(run.sys, 'stdout', stream):
             run.print_diagnostic('\u24b6\u24b7')
         stream.flush()
-        self.assertEqual(stream.buffer.getvalue(), b'\\u24b6\\u24b7\r\n' if __import__('os').name == 'nt' else b'\\u24b6\\u24b7\n')
+        self.assertEqual(
+            stream.buffer.getvalue(),
+            (
+                b'\\u24b6\\u24b7\r\n'
+                if __import__('os').name == 'nt'
+                else b'\\u24b6\\u24b7\n'
+            ),
+        )
         run.HISTORY['utf8'] = ['\u24b6\u24b7']
         run.write_game_log('utf8')
-        self.assertEqual(Path('games/game_utf8.log').read_text(encoding='utf-8'), '\u24b6\u24b7\n')
+        self.assertEqual(
+            Path('games/game_utf8.log').read_text(encoding='utf-8'),
+            '\u24b6\u24b7\n',
+        )

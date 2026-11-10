@@ -23,13 +23,21 @@ class SensitivityTests(unittest.TestCase):
         self.assertNotIn('adjacent_plan_tactical_override_margin', names)
 
     def test_canonical_diagnostics_exclude_clock_not_scores(self):
-        first = {'turn_token': 'secret', 'deep_moves': [{'score': 12, 'search_nodes': 8,
-                                                     'search_elapsed_ms': 45}]}
+        first = {
+            'turn_token': 'secret',
+            'deep_moves': [
+                {'score': 12, 'search_nodes': 8, 'search_elapsed_ms': 45}
+            ],
+        }
         second = copy.deepcopy(first)
         second['deep_moves'][0]['search_nodes'] = 90
-        self.assertEqual(sensitivity.canonical(first), sensitivity.canonical(second))
+        self.assertEqual(
+            sensitivity.canonical(first), sensitivity.canonical(second)
+        )
         second['deep_moves'][0]['score'] = 13
-        self.assertNotEqual(sensitivity.canonical(first), sensitivity.canonical(second))
+        self.assertNotEqual(
+            sensitivity.canonical(first), sensitivity.canonical(second)
+        )
         self.assertNotIn('secret', str(sensitivity.canonical(first)))
 
     def test_search_replay_requires_same_target_budget_depth_and_state(self):
@@ -82,14 +90,26 @@ class SensitivityTests(unittest.TestCase):
         self.assertEqual(row['usable_evaluations'], 0)
 
     def test_unconfirmed_change_does_not_suppress_twenty_percent(self):
-        row = self.fake_measure(self.result(), self.result(),
-                               lambda sample, weights: self.result('left' if weights['food_distance_cost'] == 100 else 'down'))
-        self.assertEqual({trial['requested_percent'] for trial in row['trials']}, {10, 20})
-        self.assertFalse(any(trial['confirmed_change'] for trial in row['trials']))
+        row = self.fake_measure(
+            self.result(),
+            self.result(),
+            lambda sample, weights: self.result(
+                'left' if weights['food_distance_cost'] == 100 else 'down'
+            ),
+        )
+        self.assertEqual(
+            {trial['requested_percent'] for trial in row['trials']}, {10, 20}
+        )
+        self.assertFalse(
+            any(trial['confirmed_change'] for trial in row['trials'])
+        )
 
     def test_diagnostic_noise_is_not_causal_internal_only_signal(self):
-        row = self.fake_measure(self.result(score=1), self.result(score=2),
-                               lambda sample, weights: self.result(score=3))
+        row = self.fake_measure(
+            self.result(score=1),
+            self.result(score=2),
+            lambda sample, weights: self.result(score=3),
+        )
         self.assertEqual(row['internal_only_states'], [])
         self.assertEqual(row['diagnostic_unconfirmed_states'], ['s'])
         self.assertFalse(row['trials'][0]['diagnostic_comparable'])
@@ -102,22 +122,48 @@ class SensitivityTests(unittest.TestCase):
 
     def test_corpus_has_real_and_lab_contexts_and_required_types(self):
         state = sensitivity.initial_state(1, rows=7, cols=7)
-        turns = [sensitivity.make_turn_data(state, 'fixture', i) for i in range(9)]
+        turns = [
+            sensitivity.make_turn_data(state, 'fixture', i) for i in range(9)
+        ]
         for i, data in enumerate(turns):
             data['remaining_moves'] = 400 - 2 * i
-        diagnostics = [{'hunger': i, 'current_target': None, 'active_games': 1} for i in range(9)]
+        diagnostics = [
+            {'hunger': i, 'current_target': None, 'active_games': 1}
+            for i in range(9)
+        ]
         actions = [{'direction': 'up'} for _ in turns]
-        with patch.object(Path, 'glob', return_value=[sensitivity.ROOT / f'fixture-{i}.log' for i in range(4)]), \
-                patch.object(sensitivity, 'parse_log', return_value=(turns, actions, None,
-                                                                   {'version': '2.16'}, diagnostics)):
+        with (
+            patch.object(
+                Path,
+                'glob',
+                return_value=[
+                    sensitivity.ROOT / f'fixture-{i}.log' for i in range(4)
+                ],
+            ),
+            patch.object(
+                sensitivity,
+                'parse_log',
+                return_value=(
+                    turns,
+                    actions,
+                    None,
+                    {'version': '2.16'},
+                    diagnostics,
+                ),
+            ),
+        ):
             corpus = sensitivity.build_corpus()
         self.assertEqual(len(corpus), 8)
-        self.assertEqual({sample['source'] for sample in corpus}, {'real_v7', 'lab'})
+        self.assertEqual(
+            {sample['source'] for sample in corpus}, {'real_v7', 'lab'}
+        )
         types = set().union(*(sample['types'] for sample in corpus))
         self.assertTrue(sensitivity.REQUIRED_TYPES <= types)
         for sample in corpus:
             self.assertNotIn('turn_token', sample['data'])
-            self.assertIn(str(sample['data']['game_id']), sample['brain'].previous_snakes)
+            self.assertIn(
+                str(sample['data']['game_id']), sample['brain'].previous_snakes
+            )
 
     def test_evaluate_clones_all_brain_context_and_restores_weights(self):
         brain = sensitivity.SnakeBrain(enable_debug=False)
@@ -135,10 +181,18 @@ class SensitivityTests(unittest.TestCase):
             return 'up'
 
         sample = {'brain': brain, 'data': {'game_id': 'not-fixture'}}
-        with patch.object(sensitivity.SnakeBrain, 'choose_move', choose), \
-                patch.object(sensitivity.SnakeBrain, 'safe_direction', side_effect=lambda data, move: move):
+        with (
+            patch.object(sensitivity.SnakeBrain, 'choose_move', choose),
+            patch.object(
+                sensitivity.SnakeBrain,
+                'safe_direction',
+                side_effect=lambda data, move: move,
+            ),
+        ):
             for _ in range(2):
-                self.assertEqual(sensitivity.evaluate(sample, {})['move'], 'up')
+                self.assertEqual(
+                    sensitivity.evaluate(sample, {})['move'], 'up'
+                )
         self.assertEqual(observed, [original, original])
         self.assertEqual(vars(brain), original)
 

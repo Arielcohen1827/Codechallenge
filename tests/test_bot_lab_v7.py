@@ -1,4 +1,5 @@
 """Bounded simulator contracts; no self-play or server dependency."""
+
 import contextlib
 import io
 import json
@@ -8,7 +9,7 @@ from dataclasses import replace
 from unittest.mock import Mock, patch
 
 from snake_bot.game_rules import MAX_MOVES
-from snake_bot.snake_state import apply_move, parse_state
+from snake_bot.snake_state import apply_move
 from snake_bot.search_engine import IterativeSearchEngine
 from snake_bot.snake_brain import SnakeBrain
 from tests.test_bot_lab_coverage import state, simulation_result
@@ -42,25 +43,57 @@ class BudgetSpawnTests(unittest.TestCase):
         self.assertEqual(simulate.call_args.args[1], 400)
 
     def test_spawns_exclude_both_tail_types_and_preserve_unknown_history(self):
-        original = state(tail_food_a=frozenset({(0, 0), (0, 1)}),
-                         tail_food_b=frozenset({(0, 2), (0, 3)}),
-                         crashed_a=True, crashed_b=None, walls=frozenset({(1, 0)}))
+        original = state(
+            tail_food_a=frozenset({(0, 0), (0, 1)}),
+            tail_food_b=frozenset({(0, 2), (0, 3)}),
+            crashed_a=True,
+            crashed_b=None,
+            walls=frozenset({(1, 0)}),
+        )
         for numbered in (True, False):
-            spawned = lab.spawn_food(original, random.Random(1), 100, numbered, 100)
-            for name in ('tail_food_a', 'tail_food_b', 'crashed_a', 'crashed_b'):
-                self.assertEqual(getattr(spawned, name), getattr(original, name))
-            items = set(spawned.food) | set(spawned.food_values) | set(spawned.pickups) | set(spawned.walls)
-            self.assertTrue(items.isdisjoint(original.tail_food_a | original.tail_food_b))
+            spawned = lab.spawn_food(
+                original, random.Random(1), 100, numbered, 100
+            )
+            for name in (
+                'tail_food_a',
+                'tail_food_b',
+                'crashed_a',
+                'crashed_b',
+            ):
+                self.assertEqual(
+                    getattr(spawned, name), getattr(original, name)
+                )
+            items = (
+                set(spawned.food)
+                | set(spawned.food_values)
+                | set(spawned.pickups)
+                | set(spawned.walls)
+            )
+            self.assertTrue(
+                items.isdisjoint(original.tail_food_a | original.tail_food_b)
+            )
 
     def test_spawn_wall_does_not_overlap_new_food_or_pickups(self):
         for numbered in (True, False):
             spawned = lab.spawn_food(state(), random.Random(4), 1, numbered, 1)
-            self.assertTrue(spawned.walls.isdisjoint(set(spawned.food_values) | spawned.food | spawned.pickups))
+            self.assertTrue(
+                spawned.walls.isdisjoint(
+                    set(spawned.food_values) | spawned.food | spawned.pickups
+                )
+            )
 
     def test_dead_side_argument_does_not_override_official_score_winner(self):
         for side in ('A', 'B'):
-            self.assertEqual(lab.winner_for(state(scores={side: 900, 'B' if side == 'A' else 'A': 0}), side), side)
-        self.assertEqual(lab.winner_for(state(scores={'A': -2501, 'B': -9999})), 'B')
+            self.assertEqual(
+                lab.winner_for(
+                    state(scores={side: 900, 'B' if side == 'A' else 'A': 0}),
+                    side,
+                ),
+                side,
+            )
+        self.assertEqual(
+            lab.winner_for(state(scores={'A': -2501, 'B': -9999})), 'B'
+        )
 
 
 class TransitionTests(unittest.TestCase):
@@ -81,24 +114,49 @@ class TransitionTests(unittest.TestCase):
             enemy = 'B' if side == 'A' else 'A'
             body = ((0, 2), (0, 1), (0, 0), (1, 0), (1, 1))
             for cause, direction, changes in (
-                    ('border', 'up', {}), ('self', 'left', {}),
-                    ('wall', 'right', {'walls': frozenset({(0, 3)})}),
-                    ('rival', 'right', {'snakes': {side: body, enemy: ((0, 3), (1, 3))}})):
-                for history, score, expected in ((False, 900, 0), (True, 900, 400), (None, 0, -500)):
+                ('border', 'up', {}),
+                ('self', 'left', {}),
+                ('wall', 'right', {'walls': frozenset({(0, 3)})}),
+                (
+                    'rival',
+                    'right',
+                    {'snakes': {side: body, enemy: ((0, 3), (1, 3))}},
+                ),
+            ):
+                for history, score, expected in (
+                    (False, 900, 0),
+                    (True, 900, 400),
+                    (None, 0, -500),
+                ):
                     with self.subTest(side=side, cause=cause, history=history):
-                        original = state(side=side, enemy=enemy,
-                                         snakes={side: body, enemy: ((4, 5),)},
-                                         scores={side: score, enemy: 10},
-                                         **{'crashed_a' if side == 'A' else 'crashed_b': history})
+                        original = state(
+                            side=side,
+                            enemy=enemy,
+                            snakes={side: body, enemy: ((4, 5),)},
+                            scores={side: score, enemy: 10},
+                            **{
+                                (
+                                    'crashed_a' if side == 'A' else 'crashed_b'
+                                ): history
+                            },
+                        )
                         original = replace(original, **changes)
                         after, events = self.transition(original, direction)
-                        self.assertEqual(after.scores, {side: expected, enemy: 10})
-                        kind = 'first' if history is False else 'subsequent' if history is True else 'unknown'
+                        self.assertEqual(
+                            after.scores, {side: expected, enemy: 10}
+                        )
+                        kind = (
+                            'first'
+                            if history is False
+                            else 'subsequent' if history is True else 'unknown'
+                        )
                         self.assertEqual(events[f'{kind}_crashes_{side}'], 1)
                         self.assertEqual(events[f'total_crashes_{side}'], 1)
                         self.assertEqual(events[f'crashes_{cause}_{side}'], 1)
                         self.assertEqual(events[f'lost_length_{side}'], 2)
-                        self.assertEqual(events[f'tail_generated_for_{enemy}'], 2)
+                        self.assertEqual(
+                            events[f'tail_generated_for_{enemy}'], 2
+                        )
                         self.assertEqual(after.body(side), body[:3])
                         self.assertEqual(events[f'foods_{side}'], 0)
 
@@ -107,25 +165,67 @@ class TransitionTests(unittest.TestCase):
             enemy = 'B' if side == 'A' else 'A'
             for beneficiary, multiplier in ((side, 3), (enemy, 4)):
                 with self.subTest(side=side, beneficiary=beneficiary):
-                    original = state(side=side, enemy=enemy,
-                                     snakes={side: ((2, 2), (2, 1), (2, 0)), enemy: ((4, 5),)},
-                                     multipliers={side: multiplier, enemy: 1},
-                                     **{'tail_food_a' if beneficiary == 'A' else 'tail_food_b': frozenset({(2, 3), (0, 0)})})
+                    original = state(
+                        side=side,
+                        enemy=enemy,
+                        snakes={
+                            side: ((2, 2), (2, 1), (2, 0)),
+                            enemy: ((4, 5),),
+                        },
+                        multipliers={side: multiplier, enemy: 1},
+                        **{
+                            (
+                                'tail_food_a'
+                                if beneficiary == 'A'
+                                else 'tail_food_b'
+                            ): frozenset({(2, 3), (0, 0)})
+                        },
+                    )
                     after, events = self.transition(original, 'right')
-                    self.assertEqual(events[f'tail_collected_{side}'], int(beneficiary == side))
-                    self.assertEqual(events[f'tail_cleaned_{side}'], int(beneficiary == enemy))
-                    self.assertEqual(events[f'tail_points_{side}'], 300 if beneficiary == side else 0)
-                    self.assertEqual(after.scores[side], 300 if beneficiary == side else 1)
-                    self.assertEqual(len(after.body(side)), 4 if beneficiary == side else 3)
+                    self.assertEqual(
+                        events[f'tail_collected_{side}'],
+                        int(beneficiary == side),
+                    )
+                    self.assertEqual(
+                        events[f'tail_cleaned_{side}'],
+                        int(beneficiary == enemy),
+                    )
+                    self.assertEqual(
+                        events[f'tail_points_{side}'],
+                        300 if beneficiary == side else 0,
+                    )
+                    self.assertEqual(
+                        after.scores[side], 300 if beneficiary == side else 1
+                    )
+                    self.assertEqual(
+                        len(after.body(side)), 4 if beneficiary == side else 3
+                    )
                     self.assertEqual(events[f'foods_{side}'], 0)
 
     def test_numbered_correct_wrong_and_classic_growth_not_tail(self):
         for changes, expected_score, counter in (
-                ({'food': frozenset({(2, 3)})}, 100, 'foods_A'),
-                ({'food': frozenset({(2, 3)}), 'food_values': {(2, 3): 1, (0, 0): 1, (0, 1): 2},
-                  'next_food_digit': 1, 'food_copy_targets': {1: 3, 2: 4}}, 100, 'foods_A'),
-                ({'food': frozenset({(0, 0)}), 'food_values': {(0, 0): 1, (2, 3): 2, (0, 1): 2},
-                  'next_food_digit': 1, 'food_copy_targets': {1: 3, 2: 4}}, -500, 'wrong_digits_A')):
+            ({'food': frozenset({(2, 3)})}, 100, 'foods_A'),
+            (
+                {
+                    'food': frozenset({(2, 3)}),
+                    'food_values': {(2, 3): 1, (0, 0): 1, (0, 1): 2},
+                    'next_food_digit': 1,
+                    'food_copy_targets': {1: 3, 2: 4},
+                },
+                100,
+                'foods_A',
+            ),
+            (
+                {
+                    'food': frozenset({(0, 0)}),
+                    'food_values': {(0, 0): 1, (2, 3): 2, (0, 1): 2},
+                    'next_food_digit': 1,
+                    'food_copy_targets': {1: 3, 2: 4},
+                },
+                -500,
+                'wrong_digits_A',
+            ),
+        ):
             original = state(**changes)
             after, events = self.transition(original, 'right')
             self.assertEqual(after.scores['A'], expected_score)
@@ -134,23 +234,36 @@ class TransitionTests(unittest.TestCase):
             self.assertEqual(events['tail_collected_A'], 0)
             self.assertEqual(events['tail_points_A'], 0)
             if counter == 'wrong_digits_A':
-                self.assertEqual(after.food_copy_targets, original.food_copy_targets)
+                self.assertEqual(
+                    after.food_copy_targets, original.food_copy_targets
+                )
                 self.assertEqual(after.food_values, {(0, 0): 1, (0, 1): 2})
                 self.assertEqual(after.next_food_digit, 1)
 
     def test_elimination_threshold_and_last_move(self):
         for score, eliminated in ((-2000, False), (-2001, True)):
-            after, events = self.transition(state(scores={'A': score, 'B': 0},
-                                                 crashed_a=True, walls=frozenset({(2, 3)})), 'right')
+            after, events = self.transition(
+                state(
+                    scores={'A': score, 'B': 0},
+                    crashed_a=True,
+                    walls=frozenset({(2, 3)}),
+                ),
+                'right',
+            )
             self.assertEqual(after.is_terminal(), eliminated)
-            self.assertEqual(events['threshold_eliminations_A'], int(eliminated))
+            self.assertEqual(
+                events['threshold_eliminations_A'], int(eliminated)
+            )
         after, events = self.transition(state(remaining_moves=1), 'right')
         self.assertTrue(after.is_terminal())
         self.assertEqual(events['threshold_eliminations_A'], 0)
 
     def test_invalid_directions_are_errors_and_not_crashes(self):
         for direction in ('bad', None):
-            with self.assertRaisesRegex(ValueError, 'direction'), patch.object(lab, 'apply_move') as delegate:
+            with (
+                self.assertRaisesRegex(ValueError, 'direction'),
+                patch.object(lab, 'apply_move') as delegate,
+            ):
                 lab.lab_transition(state(), direction)
             delegate.assert_not_called()
 
@@ -212,68 +325,143 @@ class SimulationV7Tests(unittest.TestCase):
 
     def test_honors_valid_crash_without_safe_repair_or_rival_bonus(self):
         for direction, cause, changes in (
-                ('left', 'self', {}), ('up', 'border', {'snakes': {'A': ((0, 2), (0, 1), (0, 0)), 'B': ((4, 5),)}})):
-            result, brains = self.simulate(state(crashed_a=False, crashed_b=False,
-                                                 scores={'A': 900, 'B': 50}, **changes), [direction])
+            ('left', 'self', {}),
+            (
+                'up',
+                'border',
+                {'snakes': {'A': ((0, 2), (0, 1), (0, 0)), 'B': ((4, 5),)}},
+            ),
+        ):
+            result, brains = self.simulate(
+                state(
+                    crashed_a=False,
+                    crashed_b=False,
+                    scores={'A': 900, 'B': 50},
+                    **changes,
+                ),
+                [direction],
+            )
             self.assertEqual((result.score_a, result.score_b), (0, 50))
             self.assertEqual(brains[0].committed, [direction])
             self.assertEqual(result.diagnostics[f'crashes_{cause}_A'], 1)
             self.assertIsNone(result.no_legal_side)
 
-
-    def test_summary_totals_are_by_side_and_do_not_mix_food_or_legacy_deaths(self):
-        results = [simulation_result(diagnostics={'first_crashes_A': 2, 'subsequent_crashes_B': 3,
-                                                  'unknown_crashes_B': 1, 'crashes_wall_A': 2,
-                                                  'lost_length_A': 5, 'tail_generated_for_B': 5,
-                                                  'tail_collected_B': 2, 'tail_cleaned_A': 1,
-                                                  'tail_points_B': 600, 'threshold_eliminations_A': 1},
-                                     no_legal_side=None, termination_reason='score_elimination', move_budget=400),
-                   simulation_result(diagnostics={'first_crashes_A': 1, 'tail_points_B': 100},
-                                     no_legal_side=None, termination_reason='simulation_budget', move_budget=20)]
+    def test_summary_totals_are_by_side_and_do_not_mix_food_or_legacy_deaths(
+        self,
+    ):
+        results = [
+            simulation_result(
+                diagnostics={
+                    'first_crashes_A': 2,
+                    'subsequent_crashes_B': 3,
+                    'unknown_crashes_B': 1,
+                    'crashes_wall_A': 2,
+                    'lost_length_A': 5,
+                    'tail_generated_for_B': 5,
+                    'tail_collected_B': 2,
+                    'tail_cleaned_A': 1,
+                    'tail_points_B': 600,
+                    'threshold_eliminations_A': 1,
+                },
+                no_legal_side=None,
+                termination_reason='score_elimination',
+                move_budget=400,
+            ),
+            simulation_result(
+                diagnostics={'first_crashes_A': 1, 'tail_points_B': 100},
+                no_legal_side=None,
+                termination_reason='simulation_budget',
+                move_budget=20,
+            ),
+        ]
         summary = lab.summarize_simulations(results)
-        for key, expected in (('first_crashes_A', 3), ('subsequent_crashes_B', 3), ('unknown_crashes_B', 1),
-                              ('tail_generated_for_B', 5), ('tail_collected_B', 2), ('tail_cleaned_A', 1),
-                              ('tail_points_B', 700), ('threshold_eliminations_A', 1),
-                              ('foods_A', 4), ('deaths_A', 0), ('deaths_B', 0)):
+        for key, expected in (
+            ('first_crashes_A', 3),
+            ('subsequent_crashes_B', 3),
+            ('unknown_crashes_B', 1),
+            ('tail_generated_for_B', 5),
+            ('tail_collected_B', 2),
+            ('tail_cleaned_A', 1),
+            ('tail_points_B', 700),
+            ('threshold_eliminations_A', 1),
+            ('foods_A', 4),
+            ('deaths_A', 0),
+            ('deaths_B', 0),
+        ):
             self.assertEqual(summary[key], expected, key)
-        self.assertEqual(summary['termination_reasons'], {'score_elimination': 1, 'simulation_budget': 1})
+        self.assertEqual(
+            summary['termination_reasons'],
+            {'score_elimination': 1, 'simulation_budget': 1},
+        )
         self.assertEqual(summary['move_budgets'], {400: 1, 20: 1})
 
-    def test_empty_and_legacy_results_have_zero_v7_metrics_and_pending_status(self):
+    def test_empty_and_legacy_results_have_zero_v7_metrics_and_pending_status(
+        self,
+    ):
         for results in ([], [simulation_result()]):
             summary = lab.summarize_simulations(results)
             self.assertEqual(summary['first_crashes_A'], 0)
             self.assertEqual(summary['tail_points_B'], 0)
             statuses = summary['mechanics_validation_status']
-            self.assertEqual(statuses['crash_and_tail'],
-                             'implemented according to official contract; pending live validation')
-            self.assertEqual(statuses['wrong_number_growth'], 'observed in real v7 snapshots')
-            self.assertEqual(json.loads(json.dumps(summary))['mechanics_validation_status'], statuses)
+            self.assertEqual(
+                statuses['crash_and_tail'],
+                (
+                    'implemented according to official contract; pending live '
+                    'validation'
+                ),
+            )
+            self.assertEqual(
+                statuses['wrong_number_growth'],
+                'observed in real v7 snapshots',
+            )
+            self.assertEqual(
+                json.loads(json.dumps(summary))['mechanics_validation_status'],
+                statuses,
+            )
 
     def test_console_and_json_expose_v7_metrics_and_termination(self):
         for option in ([], ['--json']):
-            result = simulation_result(diagnostics={'first_crashes_A': 1, 'tail_generated_for_B': 2},
-                                       termination_reason='simulation_budget', move_budget=20)
-            with patch('sys.argv', ['bot_lab', 'simulate', '--games', '1'] + option), \
-                    patch.object(lab, 'load_active_weights'), \
-                    patch.object(lab, 'simulate_game', return_value=result), \
-                    contextlib.redirect_stdout(io.StringIO()) as output:
+            result = simulation_result(
+                diagnostics={'first_crashes_A': 1, 'tail_generated_for_B': 2},
+                termination_reason='simulation_budget',
+                move_budget=20,
+            )
+            with (
+                patch(
+                    'sys.argv',
+                    ['bot_lab', 'simulate', '--games', '1'] + option,
+                ),
+                patch.object(lab, 'load_active_weights'),
+                patch.object(lab, 'simulate_game', return_value=result),
+                contextlib.redirect_stdout(io.StringIO()) as output,
+            ):
                 lab.main()
             if option:
                 summary = json.loads(output.getvalue())
                 self.assertEqual(summary['tail_generated_for_B'], 2)
-                self.assertEqual(summary['termination_reasons'], {'simulation_budget': 1})
+                self.assertEqual(
+                    summary['termination_reasons'], {'simulation_budget': 1}
+                )
             else:
                 self.assertIn('first_crashes_A: 1', output.getvalue())
                 self.assertIn('tail_generated_for_B: 2', output.getvalue())
                 self.assertIn('simulation_budget', output.getvalue())
                 self.assertIn('pending live validation', output.getvalue())
 
-    def test_history_is_authoritative_for_both_brains_after_repeated_crashes_and_spawns(self):
-        original = state(crashed_a=False, crashed_b=False,
-                         snakes={'A': ((0, 2), (0, 1), (0, 0), (1, 0)),
-                                 'B': ((4, 3), (4, 4), (4, 5), (3, 5))})
-        result, brains = self.simulate(original, ['up', 'up'], ['down', 'down'], budget=4, respawn=True)
+    def test_history_is_authoritative_for_both_brains_after_repeated_crashes_and_spawns(
+        self,
+    ):
+        original = state(
+            crashed_a=False,
+            crashed_b=False,
+            snakes={
+                'A': ((0, 2), (0, 1), (0, 0), (1, 0)),
+                'B': ((4, 3), (4, 4), (4, 5), (3, 5)),
+            },
+        )
+        result, brains = self.simulate(
+            original, ['up', 'up'], ['down', 'down'], budget=4, respawn=True
+        )
         self.assertEqual(brains[0].seen, [(False, False), (True, True)])
         self.assertEqual(brains[1].seen, [(True, False), (True, True)])
         self.assertEqual((result.score_a, result.score_b), (-1000, -1000))
@@ -323,30 +511,56 @@ class SimulationV7Tests(unittest.TestCase):
             self.assertEqual(brains[0].seen, [])
             self.assertEqual(result.termination_reason, reason)
 
-    def test_budget_termination_distinguishes_official_limit_from_short_budget(self):
+    def test_budget_termination_distinguishes_official_limit_from_short_budget(
+        self,
+    ):
         for budget in (0, 1, 20, 400):
-            original = state(remaining_moves=budget, crashed_a=False, crashed_b=False)
-            # Repeated border crashes would eliminate, so cycle open cells instead.
+            original = state(
+                remaining_moves=budget, crashed_a=False, crashed_b=False
+            )
+            # Repeated border crashes would eliminate, so cycle open cells
+            # instead.
             a = ['right', 'down', 'left', 'up'] * 50
             b = ['up', 'left', 'down', 'right'] * 50
-            original = replace(original, rows=12, cols=12,
-                               snakes={'A': ((2, 2),), 'B': ((8, 8),)})
+            original = replace(
+                original,
+                rows=12,
+                cols=12,
+                snakes={'A': ((2, 2),), 'B': ((8, 8),)},
+            )
             result, _ = self.simulate(original, a, b, budget=budget)
             self.assertEqual(result.turns, budget)
             self.assertEqual(result.move_budget, budget)
-            self.assertEqual(result.termination_reason, 'movement_limit' if budget == 400 else 'simulation_budget')
-        result, _ = self.simulate(state(remaining_moves=100), ['right'], budget=1)
+            self.assertEqual(
+                result.termination_reason,
+                'movement_limit' if budget == 400 else 'simulation_budget',
+            )
+        result, _ = self.simulate(
+            state(remaining_moves=100), ['right'], budget=1
+        )
         self.assertEqual(result.remaining_moves, 99)
         self.assertEqual(result.termination_reason, 'simulation_budget')
 
     def test_score_elimination_not_legacy_no_legal_death(self):
         for side in ('A', 'B'):
             enemy = 'B' if side == 'A' else 'A'
-            original = state(side=side, enemy=enemy, snakes={side: ((2, 2), (2, 1)), enemy: ((4, 5),)},
-                             scores={side: -2001, enemy: 0}, crashed_a=True, crashed_b=True)
-            result, _ = self.simulate(original, ['left'] if side == 'A' else [],
-                                      ['left'] if side == 'B' else [], budget=20)
+            original = state(
+                side=side,
+                enemy=enemy,
+                snakes={side: ((2, 2), (2, 1)), enemy: ((4, 5),)},
+                scores={side: -2001, enemy: 0},
+                crashed_a=True,
+                crashed_b=True,
+            )
+            result, _ = self.simulate(
+                original,
+                ['left'] if side == 'A' else [],
+                ['left'] if side == 'B' else [],
+                budget=20,
+            )
             self.assertEqual(result.termination_reason, 'score_elimination')
             self.assertEqual(result.winner, enemy)
-            self.assertEqual(result.diagnostics[f'threshold_eliminations_{side}'], 1)
+            self.assertEqual(
+                result.diagnostics[f'threshold_eliminations_{side}'], 1
+            )
             self.assertIsNone(result.no_legal_side)

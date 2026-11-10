@@ -1,0 +1,27 @@
+name: complexity
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  xenon:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+          cache: pip
+          cache-dependency-path: requirements-quality.txt
+      - run: python -m pip install -r requirements-quality.txt
+      - name: Require A for every block, module and project average
+        shell: bash
+        run: |
+          mapfile -d '' sources < <(git ls-files -z -- '*.py' ':(exclude)tests/**')
+          test "${#sources[@]}" -gt 0
+          xenon --max-absolute A --max-modules A --max-average A "${sources[@]}"

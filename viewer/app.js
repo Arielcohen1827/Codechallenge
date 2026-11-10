@@ -1,7 +1,8 @@
-const state = { games: [], selectedId: null, refreshBusy: false };
+const state = { games: [], selectedId: null, refreshBusy: false, snapshot: null };
 
 const el = (id) => document.getElementById(id);
-const directionNames = { up: 'ARRIBA', down: 'ABAJO', left: 'IZQUIERDA', right: 'DERECHA' };
+const directionNames = { up: 'ARRIBA', down: 'ABAJO', left: 'IZQUIERDA', right: 'DERECHA',
+  ascend: 'ASCENDER', descend: 'DESCENDER' };
 
 function targetDigit(values) {
   const present = new Set(values.map(Number));
@@ -30,6 +31,7 @@ function foodLabel(count) {
 }
 
 function boardFoodCount(data, side) {
+  if (Number(data.levels || 1) > 1) return null;
   const board = String(data.board || '');
   const length = [...board].filter((char) => char === side || char === side.toLowerCase()).length;
   return Math.max(0, length - 3);
@@ -81,8 +83,12 @@ function renderGameList() {
   }
 }
 
-function parseBoard(data) {
-  const lines = String(data.board || '').split(/\r?\n/).filter((line) => line.length);
+function parseBoard(data, plane = 'z') {
+  const combined = String(data.board || '').split(/\r?\n\s*\r?\n/);
+  const source = Number(data.levels || 1) > 1
+    ? data[`board_${plane}`] ?? combined['xyz'.indexOf(plane)] ?? ''
+    : data.board;
+  const lines = String(source || '').split(/\r?\n/).filter((line) => line.length);
   return lines.map((line) => {
     if (line.startsWith('|')) line = line.slice(1);
     if (line.endsWith('|')) line = line.slice(0, -1);
@@ -106,11 +112,19 @@ function cellClass(char, isTarget, data = {}) {
 }
 
 function renderBoard(data) {
-  const rows = parseBoard(data);
-  const rowCount = Number(data.rows) || rows.length || 1;
-  const colCount = Number(data.cols) || Math.max(1, ...rows.map((row) => row.length));
+  const cube = Number(data.levels || 1) > 1;
+  const plane = el('plane-select').value;
+  const rows = parseBoard(data, plane);
+  const rowCount = cube && plane !== 'z' ? Number(data.levels) : Number(data.rows) || rows.length || 1;
+  const colCount = cube && plane === 'x' ? Number(data.rows)
+    : Number(data.cols) || Math.max(1, ...rows.map((row) => row.length));
   const digits = rows.flatMap((row) => [...row]).filter((char) => /^[1-9]$/.test(char));
-  const next = targetDigit(digits);
+  const next = cube ? data.next_food_digit ?? null : targetDigit(digits);
+  el('cube-controls').hidden = !cube;
+  if (cube) {
+    const head = data.head || {};
+    el('head-coordinate').textContent = `Cabeza (${head.level}, ${head.row}, ${head.col})`;
+  }
   const board = el('board');
   board.style.setProperty('--rows', rowCount);
   board.style.setProperty('--cols', colCount);
@@ -122,13 +136,20 @@ function renderBoard(data) {
       const isTarget = /^[1-9]$/.test(char) && Number(char) === next;
       cell.className = `cell ${cellClass(char, isTarget, data)}`;
       cell.textContent = char === ' ' ? '' : char;
+      if (cube) {
+        const head = data.head || {};
+        const coordinate = plane === 'z' ? [head.level, row, col]
+          : plane === 'y' ? [row, head.row, col] : [row, col, head.col];
+        cell.title = `(${coordinate.join(', ')})`;
+      }
       board.appendChild(cell);
     }
   }
-  el('next-digit').textContent = next ?? '-';
+  el('next-digit').textContent = next ?? (cube ? 'Por confirmar' : '-');
 }
 
 function renderSnapshot(snapshot) {
+  state.snapshot = snapshot;
   const data = snapshot.turn_data || {};
   const decision = snapshot.decision || {};
   const game = state.games.find((item) => item.game_id === snapshot.game_id);
@@ -146,8 +167,10 @@ function renderSnapshot(snapshot) {
   el('multiplier-a').textContent = `x${data.multiplier_1 ?? 1}`;
   el('multiplier-b').textContent = `x${data.multiplier_2 ?? 1}`;
   const foodEaten = snapshot.food_eaten || {};
-  el('food-a').textContent = foodLabel(foodEaten.A ?? boardFoodCount(data, 'A'));
-  el('food-b').textContent = foodLabel(foodEaten.B ?? boardFoodCount(data, 'B'));
+  el('food-a').textContent = foodEaten.A == null && Number(data.levels || 1) > 1
+    ? 'Recuento parcial' : foodLabel(foodEaten.A ?? boardFoodCount(data, 'A'));
+  el('food-b').textContent = foodEaten.B == null && Number(data.levels || 1) > 1
+    ? 'Recuento parcial' : foodLabel(foodEaten.B ?? boardFoodCount(data, 'B'));
   const status = el('match-status');
   status.textContent = snapshot.status === 'finished' ? 'FINALIZADA' : 'EN JUEGO';
   status.classList.toggle('finished', snapshot.status === 'finished');
@@ -194,6 +217,10 @@ async function refresh() {
     state.refreshBusy = false;
   }
 }
+
+el('plane-select').addEventListener('change', () => {
+  if (state.snapshot) renderBoard(state.snapshot.turn_data || {});
+});
 
 refresh();
 setInterval(refresh, 750);

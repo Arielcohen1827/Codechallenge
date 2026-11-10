@@ -3,7 +3,6 @@ from dataclasses import replace
 from unittest.mock import patch
 
 from snake_bot import food_planner
-import run
 from snake_bot.food_planner import (
     FoodPlan,
     advantage_control_move,
@@ -28,7 +27,13 @@ from snake_bot.food_planner import (
     winning_suicide_move,
 )
 from snake_bot.snake_brain import SnakeBrain, final_safe_direction
-from snake_bot.snake_state import GameState, apply_move, count_exits, legal_moves, parse_state
+from snake_bot.snake_state import (
+    GameState,
+    apply_move,
+    count_exits,
+    legal_moves,
+    parse_state,
+)
 from tests.test_run import turn
 
 
@@ -379,7 +384,11 @@ class TestFallbackAndSurvivalBranches(unittest.TestCase):
             patch.object(food_planner, 'count_exits', return_value=1),
             patch.object(food_planner, 'legal_moves', return_value=['up']),
             patch.object(food_planner, 'can_reach_tail', return_value=True),
-            patch.object(food_planner, 'classify_safety', return_value=('ACCEPTABLE_RISK', 1, 1, True)),
+            patch.object(
+                food_planner,
+                'classify_safety',
+                return_value=('ACCEPTABLE_RISK', 1, 1, True),
+            ),
         ):
             score = survival_position_score(state, 'A')
         self.assertIsInstance(score, int)

@@ -1,49 +1,60 @@
+"""Chronological diagnostics for saved Snake protocol observations."""
+
 import argparse
 from collections import Counter, defaultdict
 import json
 from pathlib import Path
 
 from snake_bot.food_planner import choose_food_plan
+from snake_bot.geometry import directions_for
 from snake_bot.snake_brain import final_safe_direction
-from snake_bot.snake_state import apply_move, in_bounds, legal_moves, parse_state, step
+from snake_bot.snake_state import (
+    apply_move,
+    in_bounds,
+    legal_moves,
+    parse_state,
+    step,
+)
 
 
 def parse_log(path):
-    turns = []
-    actions = []
-    final = None
-    metadata = {}
-    decision_debug = []
+    """Read received snapshots, sent actions and local diagnostics in their original order."""
+    turns, actions, debug = [], [], []
+    singleton = {'bot_version': {}, 'game_over': None}
+    handlers = {
+        ('= ', 'bot_version'): lambda payload: singleton.update(bot_version=payload),
+        ('< ', 'your_turn'): lambda payload: turns.append(payload['data']),
+        ('< ', 'game_over'): lambda payload: singleton.update(game_over=payload.get('data', {})),
+        ('? ', 'decision_debug'): debug.append,
+        ('> ', 'move'): lambda payload: actions.append(dict(payload.get('data', {}))),
+        ('> ', 'shoot'): lambda payload: actions.append(
+            dict(payload.get('data', {}), action_type='shoot')
+        ),
+    }
     for line in path.read_text(encoding='utf-8', errors='replace').splitlines():
-        if line.startswith('= '):
-            payload = json.loads(line[2:])
-            if payload.get('event') == 'bot_version':
-                metadata = payload
-        elif line.startswith('< '):
-            payload = json.loads(line[2:])
-            if payload.get('event') == 'your_turn':
-                turns.append(payload['data'])
-            elif payload.get('event') == 'game_over':
-                final = payload.get('data', {})
-        elif line.startswith('> '):
-            payload = json.loads(line[2:])
-            if payload.get('action') in ('move', 'shoot'):
-                action = dict(payload.get('data', {}))
-                if payload['action'] == 'shoot':
-                    action['action_type'] = 'shoot'
-                actions.append(action)
-        elif line.startswith('? '):
-            payload = json.loads(line[2:])
-            if payload.get('event') == 'decision_debug':
-                decision_debug.append(payload)
-    return turns, actions, final, metadata, decision_debug
+        read_log_record(line, handlers)
+    return turns, actions, singleton['game_over'], singleton['bot_version'], debug
+
+
+def read_log_record(line, handlers):
+    """Dispatch one recognized log record while ignoring unrelated lines."""
+    prefix = line[:2]
+    if prefix not in {'= ', '< ', '> ', '? '}:
+        return
+    payload = json.loads(line[2:])
+    key = 'action' if prefix == '> ' else 'event'
+    handler = handlers.get((prefix, payload.get(key)))
+    if handler:
+        handler(payload)
 
 
 def score_food_delta(before, after, side):
+    """Recognize a food-sized positive score change in a simulated visible move."""
     return after.scores.get(side, 0) - before.scores.get(side, 0) >= 100
 
 
 def state_signature(state):
+    """Build a hashable observation signature retaining every coordinate axis and rule timer."""
     return (
         tuple(state.snakes.get(state.side, ())),
         tuple(state.snakes.get(state.enemy, ())),
@@ -53,178 +64,279 @@ def state_signature(state):
         tuple(sorted(state.multipliers.items())),
         tuple(sorted(state.walls)),
         tuple(sorted(state.shot_food)),
-        tuple(sorted(state.tail_food_a)), tuple(sorted(state.tail_food_b)),
-        tuple(sorted(state.bombs_large)), tuple(sorted(state.bombs_small)),
-        tuple(sorted(state.stars)), state.invincible_a, state.invincible_b,
-        state.star_frenzy, state.star_spawn_due_round, state.pending_star_spawns,
+        tuple(sorted(state.tail_food_a)),
+        tuple(sorted(state.tail_food_b)),
+        tuple(sorted(state.bombs_large)),
+        tuple(sorted(state.bombs_small)),
+        tuple(sorted(state.stars)),
+        state.invincible_a,
+        state.invincible_b,
+        state.star_frenzy,
+        state.star_spawn_due_round,
+        state.pending_star_spawns,
     )
 
 
 def analyze(path):
+    """Summarize action quality from chronological player observations."""
     turns, actions, final, metadata, decision_debug = parse_log(path)
-    metrics = Counter()
-    intervals = []
-    last_food_turn = None
-    first_food_move = None
-    previous_scores = None
-    repeated_seen = defaultdict(int)
-    longest_cycle = 0
-    previous_target = None
-    target_abandoned = 0
-    target_changes = 0
+    analysis = MatchAnalysis()
     debug_by_token = {
-        debug.get('turn_token'): debug
-        for debug in decision_debug
-        if debug.get('turn_token') is not None
+        d.get('turn_token'): d for d in decision_debug if d.get('turn_token') is not None
     }
-
     for index, data in enumerate(turns):
-        state = parse_state(data)
-        side = state.side
         action = actions[index] if index < len(actions) else {}
-        direction = action.get('direction')
-        if direction not in {'up', 'down', 'left', 'right'}:
-            continue
-        debug = debug_by_token.get(data.get('turn_token'))
+        analysis.observe(index, data, action, debug_by_token.get(data.get('turn_token')))
+    return analysis.finish(turns, final, metadata, decision_debug)
 
-        if previous_scores is not None:
-            if state.scores.get('A', 0) - previous_scores.get('A', 0) >= 100:
-                metrics['foods_A'] += 1
-            if state.scores.get('B', 0) - previous_scores.get('B', 0) >= 100:
-                metrics['foods_B'] += 1
-        previous_scores = dict(state.scores)
 
+class MatchAnalysis:
+    """Accumulate match metrics without sharing temporary state between reports."""
+
+    def __init__(self):
+        """Create accumulators for one chronological match report."""
+        self.metrics = Counter()
+        self.intervals = []
+        self.last_food_turn = None
+        self.first_food_move = None
+        self.previous_scores = None
+        self.repeated_seen = defaultdict(int)
+        self.longest_cycle = 0
+        self.previous_target = None
+        self.target_abandoned = 0
+        self.target_changes = 0
+
+    def observe(self, index, data, action, debug):
+        """Consume one aligned observed turn and proposed action."""
+        self.index, self.debug = (index, debug)
+        self.state = parse_state(data)
+        self.side = self.state.side
+        self.direction = action.get('direction')
+        if self.direction not in directions_for(self.state):
+            return
+        self.observe_scores()
         if action.get('action_type') == 'shoot':
-            # A stationary turn is not a rejected adjacent-food move, nor a
-            # collision. Keep it in the sequence so later actions stay aligned.
-            metrics['shoots_us'] += 1
-            continue
+            self.metrics['shoots_us'] += 1
+            return
+        self.observe_plan()
+        self.observe_cycle()
+        self.legal = legal_moves(self.state, self.side)
+        self.observe_illegal(data)
+        self.prepare_adjacent()
+        self.observe_kinds()
+        self.observe_adjacent()
+        self.observe_special()
+        self.observe_food()
+        self.metrics['self_collisions'] = self.metrics['own_body_collision']
 
-        plan = choose_food_plan(state, side)
+    def observe_scores(self):
+        """Compare consecutive public score counters."""
+        if self.previous_scores is not None:
+            if self.state.scores.get('A', 0) - self.previous_scores.get('A', 0) >= 100:
+                self.metrics['foods_A'] += 1
+            if self.state.scores.get('B', 0) - self.previous_scores.get('B', 0) >= 100:
+                self.metrics['foods_B'] += 1
+        self.previous_scores = dict(self.state.scores)
+
+    def observe_plan(self):
+        """Track changes to currently available objectives."""
+        plan = choose_food_plan(self.state, self.side)
         target = plan.food if plan else None
-        if previous_target is not None and target != previous_target and previous_target in state.objective_cells():
-            target_changes += 1
-            if plan and plan.safety in ('SAFE', 'ACCEPTABLE_RISK'):
-                target_abandoned += 1
-        previous_target = target
+        if target_was_abandoned(self.previous_target, target, self.state):
+            self.target_changes += 1
+            if acceptable_plan(plan):
+                self.target_abandoned += 1
+        self.previous_target = target
 
-        sig = state_signature(state)
-        repeated_seen[sig] += 1
-        if repeated_seen[sig] > 1:
-            metrics['repeated_states'] += 1
-            longest_cycle = max(longest_cycle, repeated_seen[sig])
+    def observe_cycle(self):
+        """Record repeated observed states."""
+        sig = state_signature(self.state)
+        self.repeated_seen[sig] += 1
+        if self.repeated_seen[sig] > 1:
+            self.metrics['repeated_states'] += 1
+            self.longest_cycle = max(self.longest_cycle, self.repeated_seen[sig])
 
-        legal = legal_moves(state, side)
-        if direction not in legal:
-            safe = final_safe_direction(data, direction)
-            if safe != direction:
-                metrics['illegal_moves_repaired'] += 1
-            head = state.head(side)
-            target = step(head, direction) if head is not None else None
-            if not legal:
-                metrics['no_legal_moves'] += 1
-            if target is None or not in_bounds(state, target):
-                metrics['out_of_bounds'] += 1
-            else:
-                if target in state.body(side):
-                    metrics['own_body_collision'] += 1
-                elif target in state.body(state.enemy):
-                    metrics['rival_collision'] += 1
+    def observe_illegal(self, data):
+        """Classify proposals outside known legal moves."""
+        if self.direction not in self.legal:
+            safe = final_safe_direction(data, self.direction)
+            if safe != self.direction:
+                self.metrics['illegal_moves_repaired'] += 1
+            self.head = self.state.head(self.side)
+            target = step(self.head, self.direction) if self.head is not None else None
+            if not self.legal:
+                self.metrics['no_legal_moves'] += 1
+            self.observe_collision(target)
 
-        head = state.head(side)
-        adjacent_food_dirs = []
-        food_kinds = {'numbered': state.food, 'shot': state.shot_food,
-                      'star': state.stars,
-                      'tail': state.tail_food_a if side == 'A' else state.tail_food_b}
-        edible = frozenset().union(*food_kinds.values())
-        if head is not None:
-            for candidate in legal:
-                if step(head, candidate) in edible:
-                    adjacent_food_dirs.append(candidate)
-        for kind, cells in food_kinds.items():
-            adjacent = [candidate for candidate in adjacent_food_dirs
-                        if step(head, candidate) in cells]
-            if adjacent:
-                metrics[f'adjacent_{kind}_food_seen'] += 1
-                metrics[f'adjacent_{kind}_food_' + ('taken' if direction in adjacent else 'rejected')] += 1
-        if adjacent_food_dirs:
-            metrics['adjacent_food_seen'] += 1
-            if direction in adjacent_food_dirs:
-                metrics['adjacent_food_taken'] += 1
-            else:
-                metrics['adjacent_food_rejected'] += 1
-                for candidate in adjacent_food_dirs:
-                    after_candidate = apply_move(state, candidate, side)
-                    candidate_plan = choose_food_plan(state, side, step(head, candidate))
-                    if candidate_plan is not None and candidate_plan.safety in ('SAFE', 'ACCEPTABLE_RISK'):
-                        metrics['safe_adjacent_food_rejected'] += 1
-                        break
-                if debug:
-                    plan = debug.get('plan') or {}
-                    stats = debug.get('plan_move_stats') or {}
-                    if plan.get('our_distance') == 1 and direction != plan.get('first_move'):
-                        hard_pressure = (
-                            stats.get('forced_zero')
-                            or stats.get('forced_delayed_zero')
-                            or stats.get('zero_escape_replies', 0) > 0
-                        )
-                        soft_pressure = (
-                            stats.get('one_escape_replies', 0) >= 2
-                            or stats.get('delayed_forced_zero_replies', 0) > 0
-                        )
-                        if hard_pressure:
-                            metrics['hard_adjacent_food_rejected'] += 1
-                        elif soft_pressure:
-                            metrics['soft_adjacent_food_rejected'] += 1
+    def observe_collision(self, target):
+        """Name the known collision surface for one destination."""
+        if target is None or not in_bounds(self.state, target):
+            self.metrics['out_of_bounds'] += 1
+        elif target in self.state.body(self.side):
+            self.metrics['own_body_collision'] += 1
+        elif target in self.state.body(self.state.enemy):
+            self.metrics['rival_collision'] += 1
 
-        if head is not None:
-            target_cell = step(head, direction)
-            if target_cell in state.pickups:
-                metrics['multiplier_pickups_us'] += 1
-            elif target_cell in state.wrong_food():
-                metrics['wrong_digits_us'] += 1
-            elif target_cell in state.walls:
-                metrics['wall_hits_us'] += 1
+    def prepare_adjacent(self):
+        """Find known edible neighbors of the current head."""
+        self.head = self.state.head(self.side)
+        self.adjacent_food_dirs = []
+        self.food_kinds = {
+            'numbered': self.state.food,
+            'shot': self.state.shot_food,
+            'star': self.state.stars,
+            'tail': self.state.tail_food_a if self.side == 'A' else self.state.tail_food_b,
+        }
+        self.edible = frozenset().union(*self.food_kinds.values())
+        if self.head is not None:
+            for candidate in self.legal:
+                if step(self.head, candidate) in self.edible:
+                    self.adjacent_food_dirs.append(candidate)
 
-        after = apply_move(state, direction, side)
-        if score_food_delta(state, after, side):
-            metrics['foods_us'] += 1
-            if first_food_move is None:
-                first_food_move = index
-            if last_food_turn is not None:
-                intervals.append(index - last_food_turn)
-            last_food_turn = index
-        elif last_food_turn is None:
-            metrics['max_turns_without_food'] = max(metrics['max_turns_without_food'], index + 1)
+    def observe_kinds(self):
+        """Attribute adjacent food metrics to each consumable kind."""
+        for kind, cells in self.food_kinds.items():
+            adjacent = [
+                candidate
+                for candidate in self.adjacent_food_dirs
+                if step(self.head, candidate) in cells
+            ]
+            self.record_adjacent_kind(kind, adjacent)
+
+    def record_adjacent_kind(self, kind, adjacent):
+        """Count visible and chosen neighbors of a single food kind."""
+        if adjacent:
+            self.metrics[f'adjacent_{kind}_food_seen'] += 1
+            outcome = 'taken' if self.direction in adjacent else 'rejected'
+            self.metrics[f'adjacent_{kind}_food_{outcome}'] += 1
+
+    def observe_adjacent(self):
+        """Inspect rejected adjacent food and its diagnostic pressure."""
+        if not self.adjacent_food_dirs:
+            return
+        self.metrics['adjacent_food_seen'] += 1
+        if self.direction in self.adjacent_food_dirs:
+            self.metrics['adjacent_food_taken'] += 1
+            return
+        self.metrics['adjacent_food_rejected'] += 1
+        self.observe_safe_rejection()
+        if self.debug:
+            self.observe_debug_pressure()
+
+    def observe_safe_rejection(self):
+        """Count at most one safe alternative per rejected adjacent-food decision."""
+        for candidate in self.adjacent_food_dirs:
+            apply_move(self.state, candidate, self.side)
+            plan = choose_food_plan(self.state, self.side, step(self.head, candidate))
+            if acceptable_plan(plan):
+                self.metrics['safe_adjacent_food_rejected'] += 1
+                break
+
+    def observe_debug_pressure(self):
+        """Attribute a planned immediate-food rejection to recorded search pressure."""
+        plan = self.debug.get('plan') or {}
+        if plan.get('our_distance') != 1 or self.direction == plan.get('first_move'):
+            return
+        self.record_pressure(self.debug.get('plan_move_stats') or {})
+
+    def record_pressure(self, stats):
+        """Prefer the stronger hard-pressure category when both apply."""
+        if hard_food_pressure(stats):
+            self.metrics['hard_adjacent_food_rejected'] += 1
+        elif soft_food_pressure(stats):
+            self.metrics['soft_adjacent_food_rejected'] += 1
+
+    def observe_special(self):
+        """Count multiplier, wrong-digit and wall destinations."""
+        if self.head is not None:
+            target_cell = step(self.head, self.direction)
+            if target_cell in self.state.pickups:
+                self.metrics['multiplier_pickups_us'] += 1
+            elif target_cell in self.state.wrong_food():
+                self.metrics['wrong_digits_us'] += 1
+            elif target_cell in self.state.walls:
+                self.metrics['wall_hits_us'] += 1
+
+    def observe_food(self):
+        """Update food timing from the deterministic transition."""
+        after = apply_move(self.state, self.direction, self.side)
+        if score_food_delta(self.state, after, self.side):
+            self.metrics['foods_us'] += 1
+            if self.first_food_move is None:
+                self.first_food_move = self.index
+            if self.last_food_turn is not None:
+                self.intervals.append(self.index - self.last_food_turn)
+            self.last_food_turn = self.index
+        elif self.last_food_turn is None:
+            self.metrics['max_turns_without_food'] = max(
+                self.metrics['max_turns_without_food'], self.index + 1
+            )
         else:
-            metrics['max_turns_without_food'] = max(metrics['max_turns_without_food'], index - last_food_turn)
+            self.metrics['max_turns_without_food'] = max(
+                self.metrics['max_turns_without_food'], self.index - self.last_food_turn
+            )
 
-        metrics['self_collisions'] = metrics['own_body_collision']
+    def finish(self, turns, final, metadata, decision_debug):
+        """Complete the stable report schema after the last observation."""
+        self.metrics['total_turns'] = len(turns)
+        self.observe_final_scores(final)
+        self.metrics['first_food_move'] = (
+            -1 if self.first_food_move is None else self.first_food_move
+        )
+        self.metrics['average_food_interval'] = (
+            0 if not self.intervals else round(sum(self.intervals) / len(self.intervals), 2)
+        )
+        self.metrics['food_difference'] = self.metrics['foods_A'] - self.metrics['foods_B']
+        self.metrics['food_per_100_moves'] = (
+            0 if not turns else round(self.metrics['foods_us'] * 100 / len(turns), 2)
+        )
+        self.metrics['target_changes'] = self.target_changes
+        self.metrics['target_abandoned'] = self.target_abandoned
+        self.metrics['longest_cycle'] = self.longest_cycle
+        self.metrics['self_traps'] = self.metrics['safe_adjacent_food_rejected']
+        self.metrics['final'] = final or {}
+        self.metrics['bot_version'] = metadata.get('version', 'unknown')
+        self.metrics['bot_notes'] = metadata.get('notes', '')
+        self.metrics['decision_debug_lines'] = len(decision_debug)
+        return self.metrics
 
-    metrics['total_turns'] = len(turns)
-    if final:
-        final_a = final.get('score_1')
-        final_b = final.get('score_2')
-        if final_a is not None:
-            metrics['final_score_A'] = int(final_a)
-        if final_b is not None:
-            metrics['final_score_B'] = int(final_b)
-    metrics['first_food_move'] = -1 if first_food_move is None else first_food_move
-    metrics['average_food_interval'] = 0 if not intervals else round(sum(intervals) / len(intervals), 2)
-    metrics['food_difference'] = metrics['foods_A'] - metrics['foods_B']
-    metrics['food_per_100_moves'] = 0 if not turns else round(metrics['foods_us'] * 100 / len(turns), 2)
-    metrics['target_changes'] = target_changes
-    metrics['target_abandoned'] = target_abandoned
-    metrics['longest_cycle'] = longest_cycle
-    metrics['self_traps'] = metrics['safe_adjacent_food_rejected']
-    metrics['final'] = final or {}
-    metrics['bot_version'] = metadata.get('version', 'unknown')
-    metrics['bot_notes'] = metadata.get('notes', '')
-    metrics['decision_debug_lines'] = len(decision_debug)
-    return metrics
+    def observe_final_scores(self, final):
+        """Copy supplied final scores, including zero-valued scores."""
+        if final:
+            for side, field in (('A', 'score_1'), ('B', 'score_2')):
+                value = final.get(field)
+                if value is not None:
+                    self.metrics[f'final_score_{side}'] = int(value)
+
+
+def target_was_abandoned(previous, target, state):
+    """Require the previous target to remain known before calling it abandoned."""
+    return previous is not None and target != previous and previous in state.objective_cells()
+
+
+def acceptable_plan(plan):
+    """Recognize planner classifications accepted for an adjacent-food entry."""
+    return plan is not None and plan.safety in ('SAFE', 'ACCEPTABLE_RISK')
+
+
+def hard_food_pressure(stats):
+    """Recognize a forced loss or immediate zero-escape rival reply."""
+    return (
+        stats.get('forced_zero')
+        or stats.get('forced_delayed_zero')
+        or stats.get('zero_escape_replies', 0) > 0
+    )
+
+
+def soft_food_pressure(stats):
+    """Recognize constrained replies below the hard-pressure category."""
+    return (
+        stats.get('one_escape_replies', 0) >= 2 or stats.get('delayed_forced_zero_replies', 0) > 0
+    )
 
 
 def print_report(path, metrics):
+    """Display the established match metrics in a stable readable order."""
     print(path)
     for key in [
         'total_turns',
@@ -269,24 +381,38 @@ def print_report(path, metrics):
 
 
 def expand_log_paths(raw_paths):
-    paths = []
-    for raw_path in raw_paths:
-        path = Path(raw_path)
-        matches = sorted(Path('.').glob(raw_path)) if any(ch in raw_path for ch in '*?[') else []
-        if not matches and any(ch in raw_path for ch in '*?[') and path.parent == Path('.'):
-            matches = sorted(Path('games').glob(raw_path))
+    """Expand literal or wildcard log requests with the local games-directory fallback."""
+    return [path for raw in raw_paths for path in resolve_log_path(raw)]
+
+
+def resolve_log_path(raw):
+    """Resolve one request while retaining a missing literal for a useful read error."""
+    path = Path(raw)
+    if any(ch in raw for ch in '*?['):
+        matches = find_log_matches(raw, path)
         if matches:
-            paths.extend(matches)
-        elif path.exists():
-            paths.append(path)
-        elif Path('games', raw_path).exists():
-            paths.append(Path('games', raw_path))
-        else:
-            paths.append(path)
-    return paths
+            return matches
+    return [local_log_path(path)]
+
+
+def find_log_matches(raw, path):
+    """Prefer matching working-directory logs before the games-directory fallback."""
+    matches = sorted(Path('.').glob(raw))
+    if not matches and path.parent == Path('.'):
+        return sorted(Path('games').glob(raw))
+    return matches
+
+
+def local_log_path(path):
+    """Find a literal log without replacing an existing working-directory file."""
+    candidate = Path('games', path)
+    if not path.exists() and candidate.exists():
+        return candidate
+    return path
 
 
 def main():
+    """Read selected match logs and print one analysis report per match."""
     parser = argparse.ArgumentParser()
     parser.add_argument('logs', nargs='+')
     args = parser.parse_args()

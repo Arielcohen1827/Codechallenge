@@ -24,21 +24,34 @@ class TestConfiguration(unittest.TestCase):
             self.assertEqual(launch_bot.load_bots(path, {}), [('arielcohen', 'test-secret')])
 
     def test_sparse_indices_sorted_and_quotes_comments_literal(self):
-        content = ('# Bots\n\nCODECHALLENGE_BOT_8_NAME="Charmander" # name\n'
-                   "CODECHALLENGE_BOT_8_TOKEN='literal$()#secret'\n"
-                   'CODECHALLENGE_BOT_2_NAME=arielcohen # name\n'
-                   'CODECHALLENGE_BOT_2_TOKEN=second-secret # token\n')
-        self.assertEqual(self.load(content), [('arielcohen', 'second-secret'),
-                                             ('Charmander', 'literal$()#secret')])
+        content = (
+            '# Bots\n\nCODECHALLENGE_BOT_8_NAME="Charmander" # name\n'
+            "CODECHALLENGE_BOT_8_TOKEN='literal$()#secret'\n"
+            'CODECHALLENGE_BOT_2_NAME=arielcohen # name\n'
+            'CODECHALLENGE_BOT_2_TOKEN=second-secret # token\n'
+        )
+        self.assertEqual(
+            self.load(content),
+            [
+                ('arielcohen', 'second-secret'),
+                ('Charmander', 'literal$()#secret'),
+            ],
+        )
 
     def test_empty_and_missing_file_fallback(self):
         for content in ('', 'CODECHALLENGE_BOT_1_TOKEN=\n'):
             with self.subTest(content=content):
-                self.assertEqual(self.load(content, {'CODECHALLENGE_TOKEN': 'fallback'}),
-                                 [('Token de entorno', 'fallback')])
-        self.assertEqual(launch_bot.load_bots(Path('nonexistent-launcher-env'),
-                                             {'CODECHALLENGE_TOKEN': 'fallback'}),
-                         [('Token de entorno', 'fallback')])
+                self.assertEqual(
+                    self.load(content, {'CODECHALLENGE_TOKEN': 'fallback'}),
+                    [('Token de entorno', 'fallback')],
+                )
+        self.assertEqual(
+            launch_bot.load_bots(
+                Path('nonexistent-launcher-env'),
+                {'CODECHALLENGE_TOKEN': 'fallback'},
+            ),
+            [('Token de entorno', 'fallback')],
+        )
 
     def test_configured_bots_take_precedence(self):
         self.assertEqual(self.load('CODECHALLENGE_BOT_3_TOKEN=configured\n',
@@ -73,34 +86,63 @@ class TestConfiguration(unittest.TestCase):
 
 class TestSelection(unittest.TestCase):
     def test_single_bot_still_prompts(self):
-        with patch('builtins.input', return_value='1') as prompt, patch('builtins.print') as output:
-            self.assertEqual(launch_bot.select_bot([('arielcohen', 'secret')]), 'secret')
+        with (
+            patch('builtins.input', return_value='1') as prompt,
+            patch('builtins.print') as output,
+        ):
+            self.assertEqual(
+                launch_bot.select_bot([('arielcohen', 'secret')]), 'secret'
+            )
         prompt.assert_called_once()
         self.assertIn('arielcohen', str(output.call_args_list))
         self.assertNotIn('secret', str(output.call_args_list))
 
     def test_invalid_choices_retry_then_second_bot(self):
-        with patch('builtins.input', side_effect=['', 'bad', '0', '3', '-1', '2']), patch('builtins.print'):
-            self.assertEqual(launch_bot.select_bot([('A', 'first'), ('B', 'second')]), 'second')
+        with (
+            patch(
+                'builtins.input', side_effect=['', 'bad', '0', '3', '-1', '2']
+            ),
+            patch('builtins.print'),
+        ):
+            self.assertEqual(
+                launch_bot.select_bot([('A', 'first'), ('B', 'second')]),
+                'second',
+            )
 
 
 class TestLaunch(unittest.TestCase):
     def test_main_with_real_configuration_and_selection(self):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
-            (root / '.env').write_text('CODECHALLENGE_BOT_1_NAME=arielcohen\n'
-                                      'CODECHALLENGE_BOT_1_TOKEN=first-secret\n'
-                                      'CODECHALLENGE_BOT_9_NAME=Charmander\n'
-                                      'CODECHALLENGE_BOT_9_TOKEN=second-secret\n', encoding='utf-8')
-            for choice, expected in (('1', 'first-secret'), ('2', 'second-secret')):
-                with self.subTest(choice=choice), patch('launch_bot.ROOT', root), \
-                        patch('builtins.input', side_effect=['invalid', choice]), \
-                        patch('builtins.print') as output, patch('launch_bot.start_viewer') as viewer, \
-                        patch('launch_bot.subprocess.run', return_value=Mock(returncode=0)) as run:
+            (root / '.env').write_text(
+                'CODECHALLENGE_BOT_1_NAME=arielcohen\n'
+                'CODECHALLENGE_BOT_1_TOKEN=first-secret\n'
+                'CODECHALLENGE_BOT_9_NAME=Charmander\n'
+                'CODECHALLENGE_BOT_9_TOKEN=second-secret\n',
+                encoding='utf-8',
+            )
+            for choice, expected in (
+                ('1', 'first-secret'),
+                ('2', 'second-secret'),
+            ):
+                with (
+                    self.subTest(choice=choice),
+                    patch('launch_bot.ROOT', root),
+                    patch('builtins.input', side_effect=['invalid', choice]),
+                    patch('builtins.print') as output,
+                    patch('launch_bot.start_viewer') as viewer,
+                    patch(
+                        'launch_bot.subprocess.run',
+                        return_value=Mock(returncode=0),
+                    ) as run,
+                ):
                     self.assertEqual(launch_bot.main(), 0)
                     viewer.assert_called_once()
                     self.assertEqual(run.call_args.args[0][-1], expected)
-                    self.assertEqual(run.call_args.kwargs['env']['CODECHALLENGE_TOKEN'], expected)
+                    self.assertEqual(
+                        run.call_args.kwargs['env']['CODECHALLENGE_TOKEN'],
+                        expected,
+                    )
                     self.assertEqual(run.call_args.kwargs['cwd'], root)
                     self.assertNotIn(expected, str(output.call_args_list))
 
@@ -113,13 +155,22 @@ class TestLaunch(unittest.TestCase):
             result = launch_bot.main()
         return result, viewer, run, output
 
-    def test_launch_passes_token_env_and_root_without_mutating_environment(self):
+    def test_launch_passes_token_env_and_root_without_mutating_environment(
+        self,
+    ):
         before = os.environ.copy()
         result, viewer, run, output = self.call_main(return_value='secret')
         self.assertEqual(result, 7)
         viewer.assert_called_once()
         args, kwargs = run.call_args
-        self.assertEqual(args[0], [launch_bot.sys.executable, str(launch_bot.ROOT / 'run.py'), 'secret'])
+        self.assertEqual(
+            args[0],
+            [
+                launch_bot.sys.executable,
+                str(launch_bot.ROOT / 'run.py'),
+                'secret',
+            ],
+        )
         self.assertEqual(kwargs['env']['CODECHALLENGE_TOKEN'], 'secret')
         self.assertEqual(kwargs['cwd'], launch_bot.ROOT)
         self.assertEqual(dict(os.environ), before)
@@ -135,19 +186,31 @@ class TestLaunch(unittest.TestCase):
 
     def test_bad_configuration_does_not_start_anything(self):
         for message in ('No existe .env', 'No hay tokens'):
-            with self.subTest(message=message), patch('launch_bot.load_bots', side_effect=ValueError(message)), \
-                    patch('launch_bot.start_viewer') as viewer, patch('launch_bot.subprocess.run') as run, \
-                    patch('builtins.print') as output:
+            with (
+                self.subTest(message=message),
+                patch('launch_bot.load_bots', side_effect=ValueError(message)),
+                patch('launch_bot.start_viewer') as viewer,
+                patch('launch_bot.subprocess.run') as run,
+                patch('builtins.print') as output,
+            ):
                 self.assertEqual(launch_bot.main(), 1)
                 viewer.assert_not_called()
                 run.assert_not_called()
                 self.assertIn(message, str(output.call_args_list))
 
     def test_process_errors_do_not_echo_tokens(self):
-        for failure in (OSError('secret'), launch_bot.subprocess.SubprocessError('secret')):
-            with self.subTest(failure=type(failure)), patch('launch_bot.load_bots', return_value=[('A', 'secret')]), \
-                    patch('launch_bot.select_bot', return_value='secret'), patch('launch_bot.start_viewer'), \
-                    patch('launch_bot.subprocess.run', side_effect=failure), patch('builtins.print') as output:
+        for failure in (
+            OSError('secret'),
+            launch_bot.subprocess.SubprocessError('secret'),
+        ):
+            with (
+                self.subTest(failure=type(failure)),
+                patch('launch_bot.load_bots', return_value=[('A', 'secret')]),
+                patch('launch_bot.select_bot', return_value='secret'),
+                patch('launch_bot.start_viewer'),
+                patch('launch_bot.subprocess.run', side_effect=failure),
+                patch('builtins.print') as output,
+            ):
                 self.assertEqual(launch_bot.main(), 1)
                 self.assertNotIn('secret', str(output.call_args_list))
 
@@ -167,30 +230,50 @@ class TestLaunch(unittest.TestCase):
                 run.assert_not_called()
 
     def test_interrupt_during_bot_exits_without_pause(self):
-        with patch('launch_bot.load_bots', return_value=[('A', 'secret')]), \
-                patch('launch_bot.select_bot', return_value='secret'), patch('launch_bot.start_viewer'), \
-                patch('launch_bot.subprocess.run', side_effect=KeyboardInterrupt), patch('builtins.print'):
+        with (
+            patch('launch_bot.load_bots', return_value=[('A', 'secret')]),
+            patch('launch_bot.select_bot', return_value='secret'),
+            patch('launch_bot.start_viewer'),
+            patch('launch_bot.subprocess.run', side_effect=KeyboardInterrupt),
+            patch('builtins.print'),
+        ):
             self.assertEqual(launch_bot.main(), 0)
 
 
 class TestViewer(unittest.TestCase):
     def test_healthy_viewer_is_reused(self):
-        with patch('launch_bot.viewer_healthy', return_value=True), \
-                patch('launch_bot.subprocess.Popen') as process, patch('launch_bot.webbrowser.open') as browser:
+        with (
+            patch('launch_bot.viewer_healthy', return_value=True),
+            patch('launch_bot.subprocess.Popen') as process,
+            patch('launch_bot.webbrowser.open') as browser,
+        ):
             launch_bot.start_viewer()
         process.assert_not_called()
         browser.assert_called_once_with('http://127.0.0.1:8765/')
 
     def test_windows_viewer_starts_hidden_then_opens_when_ready(self):
-        with patch('launch_bot.subprocess.CREATE_NO_WINDOW', 0x08000000, create=True), \
-                patch('launch_bot.viewer_healthy', side_effect=[False, False, True]), \
-                patch('launch_bot.os.name', 'nt'), patch('launch_bot.subprocess.Popen') as process, \
-                patch('launch_bot.time.sleep'), patch('launch_bot.webbrowser.open') as browser:
+        with (
+            patch(
+                'launch_bot.subprocess.CREATE_NO_WINDOW',
+                0x08000000,
+                create=True,
+            ),
+            patch(
+                'launch_bot.viewer_healthy', side_effect=[False, False, True]
+            ),
+            patch('launch_bot.os.name', 'nt'),
+            patch('launch_bot.subprocess.Popen') as process,
+            patch('launch_bot.time.sleep'),
+            patch('launch_bot.webbrowser.open') as browser,
+        ):
             launch_bot.start_viewer()
         process.assert_called_once_with(
             [launch_bot.sys.executable, '-m', 'tools.match_viewer'],
-            cwd=launch_bot.ROOT, creationflags=0x08000000,
-            stdout=launch_bot.subprocess.DEVNULL, stderr=launch_bot.subprocess.DEVNULL)
+            cwd=launch_bot.ROOT,
+            creationflags=0x08000000,
+            stdout=launch_bot.subprocess.DEVNULL,
+            stderr=launch_bot.subprocess.DEVNULL,
+        )
         browser.assert_called_once()
 
     def test_viewer_timeout_is_clear_and_does_not_open_browser(self):

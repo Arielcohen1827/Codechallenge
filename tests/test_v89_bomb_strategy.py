@@ -1,4 +1,5 @@
 """Economic bomb routing contracts; explosions remain legal, nonfatal actions."""
+
 from dataclasses import replace
 import unittest
 from unittest.mock import patch
@@ -28,14 +29,22 @@ def corridor(source):
 
 
 class BombEconomicPathTests(unittest.TestCase):
-    def test_costly_bomb_gets_reasonable_detour_in_temporal_and_static_routes(self):
+    def test_costly_bomb_gets_reasonable_detour_in_temporal_and_static_routes(
+        self,
+    ):
         source = snapshot()
         for find in (planner.temporal_shortest_path, planner.shortest_path):
             with self.subTest(find=find.__name__):
                 path = find(source, source.head('A'), (5, 12), 'A')
                 self.assertGreater(len(path) - 1, 8)
-                self.assertFalse(any(within_blast_zone(cell, source.bombs_large,
-                                                     source.bombs_small) for cell in path))
+                self.assertFalse(
+                    any(
+                        within_blast_zone(
+                            cell, source.bombs_large, source.bombs_small
+                        )
+                        for cell in path
+                    )
+                )
                 after = planner.simulate_path_to_food(source, 'A', path)
                 self.assertGreater(after.scores['A'], source.scores['A'])
 
@@ -50,14 +59,18 @@ class BombEconomicPathTests(unittest.TestCase):
 
     def test_inevitable_bomb_does_not_make_route_or_action_illegal(self):
         source = corridor(snapshot())
-        path = planner.temporal_shortest_path(source, source.head('A'), (5, 12), 'A')
+        path = planner.temporal_shortest_path(
+            source, source.head('A'), (5, 12), 'A'
+        )
         self.assertEqual(len(path) - 1, 8)
         plan = planner.build_food_plan(source, 'A', (5, 12), None, 0)
         self.assertIsNotNone(plan)
         self.assertGreater(plan.bomb_loss, 6000)
         self.assertEqual(plan.bomb_trigger_count, 1)
         self.assertIn('right', snake_state.legal_moves(source, 'A'))
-        clear = planner.build_food_plan(replace(source, bombs_large=frozenset()), 'A', (5, 12), None, 0)
+        clear = planner.build_food_plan(
+            replace(source, bombs_large=frozenset()), 'A', (5, 12), None, 0
+        )
         self.assertGreater(clear.value, plan.value)
         self.assertNotEqual(plan.safety, 'SUICIDAL')
 
@@ -77,25 +90,40 @@ class BombEconomicPathTests(unittest.TestCase):
         self.assertEqual(planner.build_food_plan(source, 'A', (5, 12), None, 0).value,
                          planner.build_food_plan(clear, 'A', (5, 12), None, 0).value)
 
-    def test_geometric_safe_candidate_is_optional_and_never_relabels_bombs_as_walls(self):
+    def test_geometric_safe_candidate_is_optional_and_never_relabels_bombs_as_walls(
+        self,
+    ):
         source = snapshot()
-        safe = snake_state.temporal_shortest_path(source, source.head('A'), (5, 12), 'A', avoid_blast=True)
+        safe = snake_state.temporal_shortest_path(
+            source, source.head('A'), (5, 12), 'A', avoid_blast=True
+        )
         self.assertGreater(len(safe) - 1, 8)
         trapped = corridor(source)
-        self.assertIsNone(snake_state.temporal_shortest_path(
-            trapped, trapped.head('A'), (5, 12), 'A', avoid_blast=True))
-        self.assertIsNotNone(snake_state.temporal_shortest_path(
-            trapped, trapped.head('A'), (5, 12), 'A'))
+        self.assertIsNone(
+            snake_state.temporal_shortest_path(
+                trapped, trapped.head('A'), (5, 12), 'A', avoid_blast=True
+            )
+        )
+        self.assertIsNotNone(
+            snake_state.temporal_shortest_path(
+                trapped, trapped.head('A'), (5, 12), 'A'
+            )
+        )
 
 
 class BombCandidateValueTests(unittest.TestCase):
     def test_immediate_explosion_is_economic_risk_not_structural_death(self):
-        source = snapshot(snakes={'A': ((5, 5), (5, 4)), 'B': ((15, 15),)},
-                          bombs_large=frozenset({(7, 8)}), shot_food=frozenset())
+        source = snapshot(
+            snakes={'A': ((5, 5), (5, 4)), 'B': ((15, 15),)},
+            bombs_large=frozenset({(7, 8)}),
+            shot_food=frozenset(),
+        )
         after = planner.apply_move(source, 'right', 'A')
         self.assertNotEqual(planner.classify_safety(after, 'A')[0], 'SUICIDAL')
         bomb_score = planner.move_quality_score(source, 'A', 'right')[0]
-        clear_score = planner.move_quality_score(replace(source, bombs_large=frozenset()), 'A', 'right')[0]
+        clear_score = planner.move_quality_score(
+            replace(source, bombs_large=frozenset()), 'A', 'right'
+        )[0]
         self.assertLess(bomb_score, clear_score - 6000)
         self.assertIn('right', snake_state.legal_moves(source))
 
@@ -126,15 +154,21 @@ class BombCandidateValueTests(unittest.TestCase):
 class BombPlanningReuseTests(unittest.TestCase):
     def test_action_boundary_owns_cache_and_resets_it_on_errors(self):
         from snake_bot.snake_brain import SnakeBrain
+
         brain = SnakeBrain()
         scopes = []
+
         def move(data):
             scopes.append(planner._planning_cache.get())
             if data.get('fail'):
                 raise RuntimeError('interrupted action')
             return 'up'
+
         with patch.object(brain, 'choose_move', side_effect=move):
-            self.assertEqual(brain.choose_action({}), {'action_type': 'move', 'direction': 'up'})
+            self.assertEqual(
+                brain.choose_action({}),
+                {'action_type': 'move', 'direction': 'up'},
+            )
             self.assertIsNotNone(scopes[0])
             self.assertIsNone(planner._planning_cache.get())
             with self.assertRaisesRegex(RuntimeError, 'interrupted action'):
@@ -143,17 +177,32 @@ class BombPlanningReuseTests(unittest.TestCase):
             self.assertIsNot(scopes[0], scopes[1])
             self.assertIsNone(planner._planning_cache.get())
 
-    def test_temporal_bfs_does_not_recheck_blasts_for_already_visited_cells(self):
-        source = snapshot(snakes={'A': ((0, 0),), 'B': ((19, 0),)},
-                          bombs_large=frozenset(), bombs_small=frozenset({(10, 10)}))
-        with patch.object(snake_state, 'path_blast_blocked',
-                          wraps=snake_state.path_blast_blocked) as blocked:
-            path = snake_state.temporal_shortest_path(source, (0, 0), (19, 19), 'A', avoid_blast=True)
+    def test_temporal_bfs_does_not_recheck_blasts_for_already_visited_cells(
+        self,
+    ):
+        source = snapshot(
+            snakes={'A': ((0, 0),), 'B': ((19, 0),)},
+            bombs_large=frozenset(),
+            bombs_small=frozenset({(10, 10)}),
+        )
+        with patch.object(
+            snake_state,
+            'path_blast_blocked',
+            wraps=snake_state.path_blast_blocked,
+        ) as blocked:
+            path = snake_state.temporal_shortest_path(
+                source, (0, 0), (19, 19), 'A', avoid_blast=True
+            )
             self.assertEqual(len(path), 39)
             self.assertLess(blocked.call_count, 2 * source.rows * source.cols)
-        with patch.object(snake_state, 'path_blast_blocked',
-                          wraps=snake_state.path_blast_blocked) as blocked:
-            distances = snake_state.temporal_distance_map(source, (0, 0), 'A', avoid_blast=True)
+        with patch.object(
+            snake_state,
+            'path_blast_blocked',
+            wraps=snake_state.path_blast_blocked,
+        ) as blocked:
+            distances = snake_state.temporal_distance_map(
+                source, (0, 0), 'A', avoid_blast=True
+            )
             self.assertEqual(distances[(19, 19)], len(path) - 1)
             self.assertLess(blocked.call_count, 2 * source.rows * source.cols)
 
@@ -182,18 +231,33 @@ class BombPlanningReuseTests(unittest.TestCase):
             reversed_map = planner.food_distances(source, 'A', positions[::-1])
             self.assertEqual(list(reversed_map), list(positions[::-1]))
 
-    def test_repeated_routes_reuse_queries_without_aliasing_different_score_states(self):
+    def test_repeated_routes_reuse_queries_without_aliasing_different_score_states(
+        self,
+    ):
         source = snapshot()
         cheap = replace(source, scores={'A': 1, 'B': 100})
-        with planner._planning_scope(), patch.object(
-                planner, 'geometric_temporal_shortest_path',
-                wraps=planner.geometric_temporal_shortest_path) as find:
-            expensive_path = planner.temporal_shortest_path(source, source.head('A'), (5, 12), 'A')
+        with (
+            planner._planning_scope(),
+            patch.object(
+                planner,
+                'geometric_temporal_shortest_path',
+                wraps=planner.geometric_temporal_shortest_path,
+            ) as find,
+        ):
+            expensive_path = planner.temporal_shortest_path(
+                source, source.head('A'), (5, 12), 'A'
+            )
             calls = find.call_count
-            self.assertEqual(planner.temporal_shortest_path(source, source.head('A'), (5, 12), 'A'),
-                             expensive_path)
+            self.assertEqual(
+                planner.temporal_shortest_path(
+                    source, source.head('A'), (5, 12), 'A'
+                ),
+                expensive_path,
+            )
             self.assertEqual(find.call_count, calls)
-            cheap_path = planner.temporal_shortest_path(cheap, cheap.head('A'), (5, 12), 'A')
+            cheap_path = planner.temporal_shortest_path(
+                cheap, cheap.head('A'), (5, 12), 'A'
+            )
             self.assertLess(len(cheap_path), len(expensive_path))
 
     def test_future_food_geometry_does_not_simulate_from_the_wrong_head(self):
@@ -220,10 +284,16 @@ class BombPlanningReuseTests(unittest.TestCase):
                             snake_state.path_blast_blocked(source, (0, 1), side, turn, cells),
                             snake_state.path_blast_blocked(source, (0, 1), side, turn))
 
-    def test_repeated_simulation_reuses_shared_transition_only_inside_scope(self):
+    def test_repeated_simulation_reuses_shared_transition_only_inside_scope(
+        self,
+    ):
         source = snapshot()
-        path = planner.geometric_temporal_shortest_path(source, source.head('A'), (5, 12), 'A')
-        with patch.object(planner, 'official_apply_move', wraps=planner.official_apply_move) as apply:
+        path = planner.geometric_temporal_shortest_path(
+            source, source.head('A'), (5, 12), 'A'
+        )
+        with patch.object(
+            planner, 'official_apply_move', wraps=planner.official_apply_move
+        ) as apply:
             with planner._planning_scope():
                 first = planner.simulate_path_economy(source, 'A', path)
                 first_calls = apply.call_count
@@ -231,22 +301,35 @@ class BombPlanningReuseTests(unittest.TestCase):
                 self.assertGreater(first_calls, 0)
                 self.assertEqual(apply.call_count, first_calls)
                 self.assertEqual(second, first)
-            self.assertEqual(planner.simulate_path_economy(source, 'A', path), first)
+            self.assertEqual(
+                planner.simulate_path_economy(source, 'A', path), first
+            )
             self.assertEqual(apply.call_count, first_calls * 2)
 
-    def test_nested_and_failed_scopes_do_not_leak_results_between_decisions(self):
+    def test_nested_and_failed_scopes_do_not_leak_results_between_decisions(
+        self,
+    ):
         source = snapshot(remaining_moves=102)
-        path = planner.geometric_temporal_shortest_path(source, source.head('A'), (5, 12), 'A')
-        with patch.object(planner, 'official_apply_move', wraps=planner.official_apply_move) as apply:
+        path = planner.geometric_temporal_shortest_path(
+            source, source.head('A'), (5, 12), 'A'
+        )
+        with patch.object(
+            planner, 'official_apply_move', wraps=planner.official_apply_move
+        ) as apply:
             with self.assertRaisesRegex(RuntimeError, 'interrupted decision'):
                 with planner._planning_scope():
                     expected = planner.simulate_path_economy(source, 'A', path)
                     calls = apply.call_count
                     with planner._planning_scope():
-                        self.assertEqual(planner.simulate_path_economy(source, 'A', path), expected)
+                        self.assertEqual(
+                            planner.simulate_path_economy(source, 'A', path),
+                            expected,
+                        )
                     self.assertEqual(apply.call_count, calls)
                     raise RuntimeError('interrupted decision')
-            self.assertEqual(planner.simulate_path_economy(source, 'A', path), expected)
+            self.assertEqual(
+                planner.simulate_path_economy(source, 'A', path), expected
+            )
             self.assertEqual(apply.call_count, calls * 2)
 
 

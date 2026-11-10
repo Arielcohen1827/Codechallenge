@@ -1,6 +1,7 @@
+"""Load validated strategy parameters while keeping active selections local."""
+
 import json
 from pathlib import Path
-
 
 DEFAULT_WEIGHTS = {
     'food_base_value': 10_000,
@@ -156,20 +157,26 @@ ACTIVE_WEIGHTS = dict(DEFAULT_WEIGHTS)
 
 
 def get_weights():
+    """Return the active parameter mapping used by the current process."""
     return ACTIVE_WEIGHTS
 
 
 def reset_active_weights():
+    """Restore the documented defaults in the existing shared mapping."""
     ACTIVE_WEIGHTS.clear()
     ACTIVE_WEIGHTS.update(DEFAULT_WEIGHTS)
 
 
 def set_active_weights(weights):
+    """Activate recognized integer parameters while retaining unspecified defaults."""
     reset_active_weights()
-    ACTIVE_WEIGHTS.update({key: int(value) for key, value in weights.items() if key in DEFAULT_WEIGHTS})
+    ACTIVE_WEIGHTS.update(
+        {key: int(value) for key, value in weights.items() if key in DEFAULT_WEIGHTS}
+    )
 
 
 def load_weights(path):
+    """Read a JSON configuration and merge recognized coefficients with defaults."""
     raw = json.loads(Path(path).read_text())
     weights = dict(DEFAULT_WEIGHTS)
     weights.update({key: int(value) for key, value in raw.items() if key in DEFAULT_WEIGHTS})
@@ -177,6 +184,7 @@ def load_weights(path):
 
 
 def load_active_weights(path='weights/active_weights.json'):
+    """Load the optional local configuration and report whether a file was available."""
     weight_path = Path(path)
     if not weight_path.exists():
         return False
@@ -185,6 +193,7 @@ def load_active_weights(path='weights/active_weights.json'):
 
 
 def save_weights(path, weights):
+    """Write a stable JSON representation containing every recognized coefficient."""
     weight_path = Path(path)
     weight_path.parent.mkdir(parents=True, exist_ok=True)
     payload = {key: int(weights[key]) for key in sorted(DEFAULT_WEIGHTS)}
